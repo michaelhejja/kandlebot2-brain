@@ -1,3 +1,30 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:686686497a8f23723a562d05b873c647f4228fc668050ef9a880303b92875e11
-size 4721
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Trained model artifacts (large binaries, kept out of git unless intentionally committed via LFS)
+models/*.joblib
+models/*.pkl
+!models/.gitkeep
+
+# Data
+*.csv
+data/
+
+# Env / secrets
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+.vscode/
+
+# Test / tooling
+.pytest_cache/
+.coverage
+htmlcov/
+
