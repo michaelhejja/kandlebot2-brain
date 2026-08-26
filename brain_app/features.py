@@ -62,8 +62,13 @@ def calculate_optimal_entry(
         Dict with entry_recommendation, entry_price, stop_loss, take_profit
     """
     try:
-        # Extract indicators from nested structure
-        indicators = payload.get("indicators", {})
+        # Extract indicators from either nested or flat structure
+        if "indicators" in payload and isinstance(payload["indicators"], dict):
+            indicators = payload["indicators"]
+        else:
+            # Flat format - extract from top level
+            indicators = payload
+        
         signal_type = payload.get("signal_type", "long")
         
         rsi = indicators.get("rsi", 50.0)
@@ -594,28 +599,51 @@ def validate_payload(payload: dict[str, Any]) -> None:
     if not isinstance(payload, dict):
         raise PayloadValidationError("Request body must be a JSON object.")
 
-    for field in ("symbol", "signal_type", "indicators"):
+    for field in ("symbol", "signal_type"):
         if field not in payload:
             raise PayloadValidationError(f"Missing required field: '{field}'")
 
-    if payload["signal_type"] not in ("long", "short"):
-        raise PayloadValidationError("'signal_type' must be 'long' or 'short'")
+    if payload["signal_type"] not in ("long", "short", "NORMAL", "CLASSIC_DIVERGENCE", "EXTREME_DIVERGENCE", "MFI_LEADING_FLIP", "CONVERGENCE_BOUNCE"):
+        raise PayloadValidationError("'signal_type' must be a valid signal type")
 
-    if not isinstance(payload["indicators"], dict):
-        raise PayloadValidationError("'indicators' must be an object")
+    # Indicators can be nested (old format) or flat (new format)
+    # If flat, we'll extract them below; if nested, they must exist
+    if "indicators" in payload:
+        if not isinstance(payload["indicators"], dict):
+            raise PayloadValidationError("'indicators' must be an object")
 
 
 def build_feature_vector(payload: dict[str, Any], tf_features: dict | None = None) -> dict[str, float]:
     """Extract a fixed-order, fixed-shape feature dict from a signal payload.
 
+    Handles both flat and nested indicator formats:
+    - Flat: indicators are top-level fields (ema_20, rsi, etc.)
+    - Nested: indicators are under an "indicators" object
+    
     Missing indicator keys default to 0.0 so the model always receives a
     consistent shape (matters most before every indicator is wired up).
     
     Args:
-        payload: Signal payload with indicators.
+        payload: Signal payload with indicators (flat or nested).
         tf_features: Optional dict with multi-TF alignment features (added by routes.py).
     """
-    indicators = payload["indicators"]
+    # Handle both flat and nested formats
+    if "indicators" in payload and isinstance(payload["indicators"], dict):
+        # Nested format
+        indicators = payload["indicators"]
+    else:
+        # Flat format - extract all indicator-like fields
+        # Copy top-level fields that look like indicators
+        indicators = {
+            k: payload[k] for k in payload 
+            if k in [
+                "ema_9", "ema_20", "ema_21", "ema_50", "ema_200",
+                "rsi", "crsi", "macd", "macd_signal", "atr", "volume",
+                "mfi", "price_trend", "mfi_trend", "reversal_signal", "reversal_confidence",
+                "adx", "open", "high", "low", "close"
+            ]
+        }
+    
     features = {col: float(indicators.get(col, 0.0)) for col in FEATURE_COLUMNS}
     
     # If multi-TF features are provided, merge them in
@@ -651,7 +679,12 @@ def analyze_reversal_signals(payload: dict[str, Any], signal_type: str) -> dict[
             'confidence_boost': 0-20 (percentage points to add to model confidence)
         }
     """
-    indicators = payload.get("indicators", {})
+    # Extract indicators from either nested or flat structure
+    if "indicators" in payload and isinstance(payload["indicators"], dict):
+        indicators = payload["indicators"]
+    else:
+        # Flat format - extract from top level
+        indicators = payload
     
     reversal_signal = indicators.get("reversal_signal")
     reversal_confidence = float(indicators.get("reversal_confidence", 0))
