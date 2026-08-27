@@ -129,6 +129,123 @@ def sync_candle():
         return jsonify(error=f"Error storing candle: {str(e)}"), 500
 
 
+@api_bp.post("/bulk-sync")
+def bulk_sync_candles():
+    """Receive multiple historical candles and store them all at once.
+    
+    Expected payload:
+    {
+        "candles": [
+            {
+                "symbol": "ETH",
+                "timeframe": "1m",
+                "timestamp": "2026-08-27T14:00:00Z",
+                "open": 2500.0,
+                "high": 2502.0,
+                "low": 2499.0,
+                "close": 2501.0,
+                "volume": 1000.0,
+                "ema_9": 2500.5,
+                "ema_20": 2500.5,
+                "ema_50": 2499.0,
+                "ema_200": 2498.0,
+                "crsi": 35.0,
+                "adx": 25.0,
+                "atr": 10.0,
+                "mfi": 40.0
+            },
+            ...more candles...
+        ]
+    }
+    """
+    if not _check_api_key():
+        return jsonify(error="Unauthorized"), 401
+
+    payload = request.get_json(silent=True)
+    
+    if not isinstance(payload, dict) or "candles" not in payload:
+        return jsonify(error="Invalid payload - expected {candles: [...]}"), 400
+    
+    if not isinstance(payload["candles"], list):
+        return jsonify(error="'candles' must be an array"), 400
+    
+    candles = payload["candles"]
+    if not candles:
+        return jsonify(error="Empty candles array"), 400
+
+    stored_count = 0
+    errors = []
+
+    for idx, candle in enumerate(candles):
+        try:
+            # Validate required fields
+            for field in ("symbol", "timestamp", "open", "high", "low", "close", "volume"):
+                if field not in candle:
+                    errors.append(f"Candle {idx}: Missing required field '{field}'")
+                    continue
+
+            # Parse timestamp
+            ts_input = candle["timestamp"]
+            if isinstance(ts_input, (int, float)):
+                timestamp = datetime.fromtimestamp(ts_input, tz=timezone.utc)
+            else:
+                ts_str = str(ts_input)
+                if ts_str.endswith("Z"):
+                    ts_str = ts_str[:-1] + "+00:00"
+                timestamp = datetime.fromisoformat(ts_str)
+
+            # Extract OHLCV
+            ohlcv = {
+                "open": float(candle["open"]),
+                "high": float(candle["high"]),
+                "low": float(candle["low"]),
+                "close": float(candle["close"]),
+                "volume": float(candle["volume"]),
+            }
+
+            # Extract indicators (all flat at top level)
+            indicators = {}
+            indicator_fields = [
+                "ema_9", "ema_20", "ema_50", "ema_200",
+                "crsi", "rsi", "adx", "atr", "mfi",
+                "price_trend", "mfi_trend"
+            ]
+            for field in indicator_fields:
+                if field in candle:
+                    indicators[field] = candle[field]
+
+            # Extract timeframe (optional, defaults to "1m")
+            timeframe = candle.get("timeframe", "1m")
+
+            # Store candle
+            current_app.candle_store.store_candle(
+                symbol=candle["symbol"],
+                timestamp=timestamp,
+                ohlcv=ohlcv,
+                indicators=indicators if indicators else None,
+                source="node_server_bulk",
+                timeframe=timeframe,
+            )
+            stored_count += 1
+
+        except Exception as e:
+            logger.error(f"Error storing candle {idx}: {e}")
+            errors.append(f"Candle {idx}: {str(e)}")
+
+    logger.info(f"Bulk sync completed: {stored_count}/{len(candles)} candles stored")
+    
+    response_data = {
+        "status": "ok" if errors else "success",
+        "total_candles": len(candles),
+        "stored_count": stored_count,
+    }
+    
+    if errors:
+        response_data["errors"] = errors[:10]  # Limit to first 10 errors in response
+
+    return jsonify(response_data), 201 if stored_count > 0 else 400
+
+
 @api_bp.post("/analyze")
 def analyze():
     if not _check_api_key():
