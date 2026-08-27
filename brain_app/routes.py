@@ -161,7 +161,24 @@ def analyze():
             confidence=0.0,
             model_used="multi_tf_filter",
             reason="insufficient_timeframe_alignment",
-            tf_alignment=tf_alignment,
+            # Diagnostic info
+            tf_alignment_score=tf_alignment["tf_alignment_score"],
+            tf_alignment_details=tf_alignment["details"],
+            # DETAILED FAILURE REASONS
+            per_timeframe_checks=tf_alignment.get("detailed_checks", {}),
+            diagnostic={
+                "message": f"TF Score {tf_alignment['tf_alignment_score']}/4 - Need ≥2 for analysis",
+                "primary_tfs_status": {
+                    "30m": "✓" if tf_alignment["tf_30m_aligned"] else "✗",
+                    "1h": "✓" if tf_alignment["tf_1h_aligned"] else "✗",
+                    "4h": "✓" if tf_alignment["tf_4h_aligned"] else "✗",
+                    "12h": "✓" if tf_alignment["tf_12h_aligned"] else "✗",
+                },
+                "secondary_tfs_status": {
+                    "5m": "✓" if tf_alignment["tf_5m_aligned"] else "✗",
+                    "15m": "✓" if tf_alignment["tf_15m_aligned"] else "✗",
+                }
+            }
         ), 200
     
     # Step 3: Build feature vector with TF features

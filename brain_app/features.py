@@ -364,6 +364,7 @@ def check_timeframe_alignment(
             - tf_4h_aligned: bool
             - tf_12h_aligned: bool
             - details: human-readable explanation
+            - detailed_checks: dict with per-timeframe failure reasons
     """
     try:
         # Fetch latest candles from each timeframe
@@ -375,6 +376,7 @@ def check_timeframe_alignment(
         # Check if we have primary TF data (30m, 1h, 4h, 12h)
         primary_tfs = ["30m", "1h", "4h", "12h"]
         if not all(candles.get(tf) for tf in primary_tfs):
+            missing = [tf for tf in primary_tfs if not candles.get(tf)]
             return {
                 "tf_alignment_score": 0,
                 "tf_5m_aligned": 0,
@@ -383,16 +385,28 @@ def check_timeframe_alignment(
                 "tf_1h_aligned": 0,
                 "tf_4h_aligned": 0,
                 "tf_12h_aligned": 0,
-                "details": "Missing candle data for one or more primary timeframes",
+                "details": f"Missing candle data for: {', '.join(missing)}",
+                "detailed_checks": {
+                    tf: f"No data" for tf in missing
+                }
             }
         
-        # Calculate alignment for each timeframe
-        aligned_5m = _check_5m_alignment(candles["5m"], signal_type)
-        aligned_15m = _check_15m_alignment(candles["15m"], signal_type)
-        aligned_30m = _check_30m_alignment(candles["30m"], signal_type)
-        aligned_1h = _check_1h_alignment(candles["1h"], signal_type)
-        aligned_4h = _check_4h_alignment(candles["4h"], signal_type)
-        aligned_12h = _check_12h_alignment(candles["12h"], signal_type)
+        # Calculate alignment for each timeframe with detailed feedback
+        detailed_checks = {}
+        
+        aligned_5m, reason_5m = _check_5m_alignment_with_reason(candles["5m"], signal_type)
+        aligned_15m, reason_15m = _check_15m_alignment_with_reason(candles["15m"], signal_type)
+        aligned_30m, reason_30m = _check_30m_alignment_with_reason(candles["30m"], signal_type)
+        aligned_1h, reason_1h = _check_1h_alignment_with_reason(candles["1h"], signal_type)
+        aligned_4h, reason_4h = _check_4h_alignment_with_reason(candles["4h"], signal_type)
+        aligned_12h, reason_12h = _check_12h_alignment_with_reason(candles["12h"], signal_type)
+        
+        detailed_checks["5m"] = reason_5m
+        detailed_checks["15m"] = reason_15m
+        detailed_checks["30m"] = reason_30m
+        detailed_checks["1h"] = reason_1h
+        detailed_checks["4h"] = reason_4h
+        detailed_checks["12h"] = reason_12h
         
         # Primary score (0-4): 30m, 1h, 4h, 12h
         score = sum([aligned_30m, aligned_1h, aligned_4h, aligned_12h])
@@ -416,6 +430,7 @@ def check_timeframe_alignment(
             "tf_4h_aligned": 1 if aligned_4h else 0,
             "tf_12h_aligned": 1 if aligned_12h else 0,
             "details": details,
+            "detailed_checks": detailed_checks,
         }
     except Exception as e:
         import logging
@@ -429,7 +444,179 @@ def check_timeframe_alignment(
             "tf_4h_aligned": 0,
             "tf_12h_aligned": 0,
             "details": f"Error checking alignment: {str(e)}",
+            "detailed_checks": {"error": str(e)},
         }
+
+
+def _check_30m_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
+    """30m alignment check with detailed failure reason."""
+    if not candle:
+        return False, "No 30m candle data"
+    
+    ema_20 = candle.get("ema_20")
+    ema_50 = candle.get("ema_50")
+    close = candle.get("close")
+    ema_9 = candle.get("ema_9")
+    
+    if None in [ema_20, ema_50, close, ema_9]:
+        missing = [k for k, v in {"ema_20": ema_20, "ema_50": ema_50, "close": close, "ema_9": ema_9}.items() if v is None]
+        return False, f"Missing indicators: {missing}"
+    
+    if signal_type == "long":
+        if ema_20 <= ema_50:
+            return False, f"EMA20 ({ema_20:.2f}) ≤ EMA50 ({ema_50:.2f}) - need uptrend"
+        if close <= ema_9:
+            return False, f"Close ({close:.2f}) ≤ EMA9 ({ema_9:.2f}) - need price above MA"
+        return True, f"EMA20 > EMA50 and Close > EMA9 ✓"
+    else:  # short
+        if ema_20 >= ema_50:
+            return False, f"EMA20 ({ema_20:.2f}) ≥ EMA50 ({ema_50:.2f}) - need downtrend"
+        if close >= ema_9:
+            return False, f"Close ({close:.2f}) ≥ EMA9 ({ema_9:.2f}) - need price below MA"
+        return True, f"EMA20 < EMA50 and Close < EMA9 ✓"
+
+
+def _check_1h_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
+    """1h alignment check with detailed failure reason."""
+    if not candle:
+        return False, "No 1h candle data"
+    
+    ema_20 = candle.get("ema_20")
+    ema_50 = candle.get("ema_50")
+    ema_200 = candle.get("ema_200")
+    adx = candle.get("adx")
+    rsi = candle.get("rsi")
+    
+    if None in [ema_20, ema_50, ema_200, adx, rsi]:
+        missing = [k for k, v in {"ema_20": ema_20, "ema_50": ema_50, "ema_200": ema_200, "adx": adx, "rsi": rsi}.items() if v is None]
+        return False, f"Missing: {missing}"
+    
+    adx_check = adx > 20
+    
+    if signal_type == "long":
+        if not (ema_20 > ema_50):
+            return False, f"EMA20 ({ema_20:.2f}) ≤ EMA50 ({ema_50:.2f}) - need EMA20 > EMA50"
+        if not (ema_50 > ema_200):
+            return False, f"EMA50 ({ema_50:.2f}) ≤ EMA200 ({ema_200:.2f}) - need EMA50 > EMA200"
+        if not adx_check:
+            return False, f"ADX ({adx:.2f}) ≤ 20 - need trend strength"
+        if not (rsi > 40):
+            return False, f"RSI ({rsi:.2f}) ≤ 40 - too weak"
+        return True, f"Full EMA hierarchy and ADX > 20 ✓"
+    else:  # short
+        if not (ema_20 < ema_50):
+            return False, f"EMA20 ({ema_20:.2f}) ≥ EMA50 ({ema_50:.2f}) - need EMA20 < EMA50"
+        if not (ema_50 < ema_200):
+            return False, f"EMA50 ({ema_50:.2f}) ≥ EMA200 ({ema_200:.2f}) - need EMA50 < EMA200"
+        if not adx_check:
+            return False, f"ADX ({adx:.2f}) ≤ 20 - need trend strength"
+        if not (rsi < 60):
+            return False, f"RSI ({rsi:.2f}) ≥ 60 - too strong"
+        return True, f"Full EMA hierarchy and ADX > 20 ✓"
+
+
+def _check_4h_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
+    """4h alignment check with detailed failure reason."""
+    if not candle:
+        return False, "No 4h candle data"
+    
+    ema_50 = candle.get("ema_50")
+    ema_200 = candle.get("ema_200")
+    close = candle.get("close")
+    rsi = candle.get("rsi")
+    
+    if None in [ema_50, ema_200, close, rsi]:
+        missing = [k for k, v in {"ema_50": ema_50, "ema_200": ema_200, "close": close, "rsi": rsi}.items() if v is None]
+        return False, f"Missing: {missing}"
+    
+    if signal_type == "long":
+        if not (ema_50 > ema_200):
+            return False, f"EMA50 ({ema_50:.2f}) ≤ EMA200 ({ema_200:.2f}) - need macro uptrend"
+        if not (close > ema_200):
+            return False, f"Close ({close:.2f}) ≤ EMA200 ({ema_200:.2f}) - price below 200MA"
+        if not (rsi > 50):
+            return False, f"RSI ({rsi:.2f}) ≤ 50 - weak momentum"
+        return True, f"Macro trend aligned ✓"
+    else:  # short
+        if not (ema_50 < ema_200):
+            return False, f"EMA50 ({ema_50:.2f}) ≥ EMA200 ({ema_200:.2f}) - need macro downtrend"
+        if not (close < ema_200):
+            return False, f"Close ({close:.2f}) ≥ EMA200 ({ema_200:.2f}) - price above 200MA"
+        if not (rsi < 50):
+            return False, f"RSI ({rsi:.2f}) ≥ 50 - strong momentum"
+        return True, f"Macro trend aligned ✓"
+
+
+def _check_12h_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
+    """12h alignment check with detailed failure reason."""
+    if not candle:
+        return False, "No 12h candle data"
+    
+    ema_200 = candle.get("ema_200")
+    close = candle.get("close")
+    
+    if None in [ema_200, close]:
+        missing = [k for k, v in {"ema_200": ema_200, "close": close}.items() if v is None]
+        return False, f"Missing: {missing}"
+    
+    if signal_type == "long":
+        if not (close > ema_200):
+            return False, f"Close ({close:.2f}) ≤ EMA200 ({ema_200:.2f}) - bearish macro"
+        return True, f"Long-term bullish ✓"
+    else:  # short
+        if not (close < ema_200):
+            return False, f"Close ({close:.2f}) ≥ EMA200 ({ema_200:.2f}) - bullish macro"
+        return True, f"Long-term bearish ✓"
+
+
+def _check_5m_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
+    """5m alignment check with detailed failure reason."""
+    if not candle:
+        return False, "No 5m candle data"
+    
+    ema_9 = candle.get("ema_9")
+    ema_20 = candle.get("ema_20")
+    
+    if None in [ema_9, ema_20]:
+        missing = [k for k, v in {"ema_9": ema_9, "ema_20": ema_20}.items() if v is None]
+        return False, f"Missing: {missing}"
+    
+    if signal_type == "long":
+        if not (ema_9 > ema_20):
+            return False, f"EMA9 ({ema_9:.2f}) ≤ EMA20 ({ema_20:.2f})"
+        return True, f"5m scalp uptrend ✓"
+    else:  # short
+        if not (ema_9 < ema_20):
+            return False, f"EMA9 ({ema_9:.2f}) ≥ EMA20 ({ema_20:.2f})"
+        return True, f"5m scalp downtrend ✓"
+
+
+def _check_15m_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
+    """15m alignment check with detailed failure reason."""
+    if not candle:
+        return False, "No 15m candle data"
+    
+    ema_20 = candle.get("ema_20")
+    ema_50 = candle.get("ema_50")
+    close = candle.get("close")
+    ema_9 = candle.get("ema_9")
+    
+    if None in [ema_20, ema_50, close, ema_9]:
+        missing = [k for k, v in {"ema_20": ema_20, "ema_50": ema_50, "close": close, "ema_9": ema_9}.items() if v is None]
+        return False, f"Missing: {missing}"
+    
+    if signal_type == "long":
+        if ema_20 <= ema_50:
+            return False, f"EMA20 ({ema_20:.2f}) ≤ EMA50 ({ema_50:.2f})"
+        if close <= ema_9:
+            return False, f"Close ({close:.2f}) ≤ EMA9 ({ema_9:.2f})"
+        return True, f"15m swing uptrend ✓"
+    else:  # short
+        if ema_20 >= ema_50:
+            return False, f"EMA20 ({ema_20:.2f}) ≥ EMA50 ({ema_50:.2f})"
+        if close >= ema_9:
+            return False, f"Close ({close:.2f}) ≥ EMA9 ({ema_9:.2f})"
+        return True, f"15m swing downtrend ✓"
 
 
 def _check_30m_alignment(candle: dict, signal_type: str) -> bool:
