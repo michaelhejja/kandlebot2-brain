@@ -7,6 +7,7 @@ from .candle_store import CandleStore
 from .gap_recovery import GapRecovery
 from .model import SignalClassifier
 from .routes import api_bp
+from .debug_routes import debug_bp
 
 
 def create_app(config_class: type = Config) -> Flask:
@@ -28,4 +29,5 @@ def create_app(config_class: type = Config) -> Flask:
     )
 
     app.register_blueprint(api_bp)
+    app.register_blueprint(debug_bp)
     return app
