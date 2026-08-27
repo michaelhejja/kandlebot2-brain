@@ -156,10 +156,12 @@ class CandleStore:
         # For now, just use the last candle's indicators
         last_candle = constituent_candles[-1]
         indicators = {
+            "ema_9": last_candle["ema_9"],
             "ema_20": last_candle["ema_20"],
             "ema_50": last_candle["ema_50"],
             "ema_200": last_candle["ema_200"],
             "crsi": last_candle["crsi"],
+            "rsi": last_candle["rsi"],
             "adx": last_candle["adx"],
             "atr": last_candle["atr"],
             "mfi": last_candle["mfi"],
