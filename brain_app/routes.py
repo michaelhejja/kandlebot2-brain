@@ -381,6 +381,7 @@ def analyze():
         model_used="trained" if classifier.is_trained_model else "heuristic_fallback",
         tf_alignment_score=tf_alignment["tf_alignment_score"],
         tf_alignment_details=tf_alignment["details"],
+        per_timeframe_checks=tf_alignment.get("detailed_checks", {}),
         # Reversal detection analysis
         reversal_analysis={
             "has_reversal": reversal_analysis["has_reversal"],
