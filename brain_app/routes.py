@@ -93,7 +93,24 @@ def sync_candle():
         }
 
         # Extract indicators (optional, may be empty)
-        indicators = payload.get("indicators", {})
+        # Support both nested {"indicators": {...}} and flat format
+        if "indicators" in payload:
+            indicators = payload.get("indicators", {})
+        else:
+            # Flat format: extract from top-level keys
+            indicators = {
+                "ema_9": payload.get("ema_9"),
+                "ema_20": payload.get("ema_20"),
+                "ema_50": payload.get("ema_50"),
+                "ema_200": payload.get("ema_200"),
+                "crsi": payload.get("crsi"),
+                "rsi": payload.get("rsi"),
+                "adx": payload.get("adx"),
+                "atr": payload.get("atr"),
+                "mfi": payload.get("mfi"),
+            }
+            # Remove None values
+            indicators = {k: v for k, v in indicators.items() if v is not None}
         
         # Extract timeframe (optional, defaults to "1m")
         timeframe = payload.get("timeframe", "1m")
