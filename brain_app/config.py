@@ -3,10 +3,11 @@ import os
 
 
 class Config:
-    # Path to the trained model artifact (joblib pipeline). If missing, the
+    # Path to the trained model artifact (joblib pipeline or pickle file). If missing, the
     # service falls back to a simple rule-based heuristic so the endpoint
     # still works before a model has been trained.
-    MODEL_PATH = os.environ.get("MODEL_PATH", "models/model.joblib")
+    # Supports: .joblib (joblib format) or .pkl (pickle format)
+    MODEL_PATH = os.environ.get("MODEL_PATH", "models/trained_model.pkl")
 
     # Minimum predicted probability of "good signal" required to accept it.
     DECISION_THRESHOLD = float(os.environ.get("DECISION_THRESHOLD", "0.5"))

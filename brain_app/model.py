@@ -29,9 +29,14 @@ class SignalClassifier:
             )
             return None
 
-        import joblib  # local import: only needed when a model actually loads
-
-        return joblib.load(self.model_path)
+        # Support both joblib (.joblib) and pickle (.pkl) formats
+        if self.model_path.endswith('.pkl'):
+            import pickle
+            with open(self.model_path, 'rb') as f:
+                return pickle.load(f)
+        else:
+            import joblib  # local import: only needed when a model actually loads
+            return joblib.load(self.model_path)
 
     @property
     def is_trained_model(self) -> bool:

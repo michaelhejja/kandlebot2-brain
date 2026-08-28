@@ -13,29 +13,20 @@ from __future__ import annotations
 from typing import Any
 
 # Canonical, ordered list of indicator features the model expects.
-# Edit this list to match your Node.js indicator pipeline.
+# MUST match exactly what the trained model was trained on (see train_model.py)
+# Do NOT reorder or modify without retraining the model.
 FEATURE_COLUMNS = [
-    # 1m indicators (from Node.js signal)
-    "rsi",
-    "ema_9",
-    "ema_21",
-    "macd",
-    "macd_signal",
-    "atr",
-    "volume",
-    # Multi-timeframe confirmation features (5m, 15m, 30m, 1h, 4h, 12h)
-    "tf_alignment_score",  # 0-4 score from 30m, 1h, 4h, 12h (primary TFs)
-    "tf_5m_aligned",       # 0/1 boolean (intermediate confirmation)
-    "tf_15m_aligned",      # 0/1 boolean (intermediate confirmation)
-    "tf_30m_aligned",      # 0/1 boolean
-    "tf_1h_aligned",       # 0/1 boolean
-    "tf_4h_aligned",       # 0/1 boolean
-    "tf_12h_aligned",      # 0/1 boolean
-    # Reversal detection features
-    "price_trend",         # -100 to +100 (price momentum)
-    "mfi_trend",           # -100 to +100 (money flow momentum)
-    "reversal_confidence", # 0-100 (reversal prediction confidence)
-    "has_reversal_signal", # 0/1 (boolean: is there a reversal detected?)
+    "confidence",        # 0-100: reversal detection confidence
+    "ema_9",            # 1m EMA 9
+    "ema_20",           # 1m EMA 20
+    "ema_50",           # 1m EMA 50
+    "ema_200",          # 1m EMA 200
+    "mfi",              # Money Flow Index (0-100)
+    "rsi",              # RSI (0-100)
+    "adx",              # Average Directional Index (0-100)
+    "price_trend",      # -100 to +100: price momentum
+    "mfi_trend",        # -100 to +100: money flow momentum
+    "signal",           # 1.0 for BUY, 0.0 for SELL
 ]
 
 
@@ -803,16 +794,26 @@ def validate_payload(payload: dict[str, Any]) -> None:
 def build_feature_vector(payload: dict[str, Any], tf_features: dict | None = None) -> dict[str, float]:
     """Extract a fixed-order, fixed-shape feature dict from a signal payload.
 
+    Extracts exactly the 11 features the trained model was trained on:
+    1. confidence - reversal detection confidence (0-100)
+    2. ema_9, ema_20, ema_50, ema_200 - exponential moving averages
+    3. mfi - Money Flow Index
+    4. rsi - Relative Strength Index
+    5. adx - Average Directional Index
+    6. price_trend - price momentum (-100 to +100)
+    7. mfi_trend - money flow momentum (-100 to +100)
+    8. signal - 1.0 for BUY, 0.0 for SELL
+    
     Handles both flat and nested indicator formats:
     - Flat: indicators are top-level fields (ema_20, rsi, etc.)
     - Nested: indicators are under an "indicators" object
     
     Missing indicator keys default to 0.0 so the model always receives a
-    consistent shape (matters most before every indicator is wired up).
+    consistent shape.
     
     Args:
         payload: Signal payload with indicators (flat or nested).
-        tf_features: Optional dict with multi-TF alignment features (added by routes.py).
+        tf_features: Optional dict with multi-TF alignment features (currently unused).
     """
     # Handle both flat and nested formats
     if "indicators" in payload and isinstance(payload["indicators"], dict):
@@ -820,28 +821,36 @@ def build_feature_vector(payload: dict[str, Any], tf_features: dict | None = Non
         indicators = payload["indicators"]
     else:
         # Flat format - extract all indicator-like fields
-        # Copy top-level fields that look like indicators
         indicators = {
             k: payload[k] for k in payload 
             if k in [
-                "ema_9", "ema_20", "ema_21", "ema_50", "ema_200",
-                "rsi", "crsi", "macd", "macd_signal", "atr", "volume",
-                "mfi", "price_trend", "mfi_trend", "reversal_signal", "reversal_confidence",
-                "adx", "open", "high", "low", "close"
+                "ema_9", "ema_20", "ema_50", "ema_200",
+                "rsi", "mfi", "adx", "price_trend", "mfi_trend", "confidence"
             ]
         }
     
-    features = {col: float(indicators.get(col, 0.0)) for col in FEATURE_COLUMNS}
+    # Build feature vector in exact order of FEATURE_COLUMNS
+    # Map 'confidence' from payload (may be 'reversal_confidence')
+    confidence = indicators.get('confidence', payload.get('reversal_confidence', payload.get('confidence', 50.0)))
     
-    # If multi-TF features are provided, merge them in
-    if tf_features:
-        for key in ["tf_alignment_score", "tf_5m_aligned", "tf_15m_aligned", "tf_30m_aligned", "tf_1h_aligned", "tf_4h_aligned", "tf_12h_aligned"]:
-            if key in tf_features:
-                features[key] = float(tf_features[key])
-    else:
-        # Default values if no TF alignment data available
-        for key in ["tf_alignment_score", "tf_5m_aligned", "tf_15m_aligned", "tf_30m_aligned", "tf_1h_aligned", "tf_4h_aligned", "tf_12h_aligned"]:
-            features[key] = 0.0
+    # Map signal_type to numeric: BUY=1.0, SELL=0.0
+    signal_type = payload.get("signal_type", "BUY")
+    signal_numeric = 1.0 if signal_type.upper() == "BUY" else 0.0
+    
+    # Build feature dict in FEATURE_COLUMNS order
+    features = {
+        "confidence": float(confidence),
+        "ema_9": float(indicators.get("ema_9", 0.0)),
+        "ema_20": float(indicators.get("ema_20", 0.0)),
+        "ema_50": float(indicators.get("ema_50", 0.0)),
+        "ema_200": float(indicators.get("ema_200", 0.0)),
+        "mfi": float(indicators.get("mfi", 0.0)),
+        "rsi": float(indicators.get("rsi", 0.0)),
+        "adx": float(indicators.get("adx", 0.0)),
+        "price_trend": float(indicators.get("price_trend", 0.0)),
+        "mfi_trend": float(indicators.get("mfi_trend", 0.0)),
+        "signal": signal_numeric,
+    }
     
     return features
 
