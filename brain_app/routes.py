@@ -112,6 +112,10 @@ def sync_candle():
             # Remove None values
             indicators = {k: v for k, v in indicators.items() if v is not None}
         
+        # Handle ADX: if it's a dict {adx, pdi, mdi}, extract just the adx value
+        if "adx" in indicators and isinstance(indicators["adx"], dict):
+            indicators["adx"] = indicators["adx"].get("adx", 0)
+        
         # Extract timeframe (optional, defaults to "1m")
         timeframe = payload.get("timeframe", "1m")
 
