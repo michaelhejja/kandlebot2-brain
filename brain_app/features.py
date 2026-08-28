@@ -479,10 +479,12 @@ def _check_1h_alignment_with_reason(candle: dict, signal_type: str) -> tuple[boo
     ema_20 = candle.get("ema_20")
     ema_50 = candle.get("ema_50")
     ema_200 = candle.get("ema_200")
-    adx = candle.get("adx")
+    # ADX can be either a dict {adx, pdi, mdi} or a scalar value
+    adx_data = candle.get("adx", 0)
+    adx = adx_data.get("adx", 0) if isinstance(adx_data, dict) else adx_data
     rsi = candle.get("rsi")
     
-    if None in [ema_20, ema_50, ema_200, adx, rsi]:
+    if None in [ema_20, ema_50, ema_200, rsi] or not adx:
         missing = [k for k, v in {"ema_20": ema_20, "ema_50": ema_50, "ema_200": ema_200, "adx": adx, "rsi": rsi}.items() if v is None]
         return False, f"Missing: {missing}"
     
@@ -636,10 +638,12 @@ def _check_1h_alignment(candle: dict, signal_type: str) -> bool:
     ema_20 = candle.get("ema_20")
     ema_50 = candle.get("ema_50")
     ema_200 = candle.get("ema_200")
-    adx = candle.get("adx")
+    # ADX can be either a dict {adx, pdi, mdi} or a scalar value
+    adx_data = candle.get("adx", 0)
+    adx = adx_data.get("adx", 0) if isinstance(adx_data, dict) else adx_data
     rsi = candle.get("rsi")
     
-    if None in [ema_20, ema_50, ema_200, adx, rsi]:
+    if None in [ema_20, ema_50, ema_200, rsi] or not adx:
         return False
     
     adx_check = adx > 20
@@ -700,9 +704,11 @@ def _check_12h_alignment(candle: dict, signal_type: str) -> bool:
     
     ema_50 = candle.get("ema_50")
     ema_200 = candle.get("ema_200")
-    adx = candle.get("adx")
+    # ADX can be either a dict {adx, pdi, mdi} or a scalar value
+    adx_data = candle.get("adx", 0)
+    adx = adx_data.get("adx", 0) if isinstance(adx_data, dict) else adx_data
     
-    if None in [ema_50, ema_200, adx]:
+    if None in [ema_50, ema_200] or not adx:
         return False
     
     adx_check = adx > 20
