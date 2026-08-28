@@ -836,6 +836,11 @@ def build_feature_vector(payload: dict[str, Any], tf_features: dict | None = Non
     signal_type = payload.get("signal_type", "BUY")
     signal_numeric = 1.0 if signal_type.upper() == "BUY" else 0.0
     
+    # Handle ADX: can be scalar or nested object {adx, pdi, mdi}
+    adx_value = indicators.get("adx", 0.0)
+    if isinstance(adx_value, dict):
+        adx_value = adx_value.get("adx", 0.0)
+    
     # Build feature dict in FEATURE_COLUMNS order
     features = {
         "confidence": float(confidence),
@@ -845,7 +850,7 @@ def build_feature_vector(payload: dict[str, Any], tf_features: dict | None = Non
         "ema_200": float(indicators.get("ema_200", 0.0)),
         "mfi": float(indicators.get("mfi", 0.0)),
         "rsi": float(indicators.get("rsi", 0.0)),
-        "adx": float(indicators.get("adx", 0.0)),
+        "adx": float(adx_value),
         "price_trend": float(indicators.get("price_trend", 0.0)),
         "mfi_trend": float(indicators.get("mfi_trend", 0.0)),
         "signal": signal_numeric,
