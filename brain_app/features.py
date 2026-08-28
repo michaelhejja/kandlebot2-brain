@@ -64,7 +64,7 @@ def calculate_optimal_entry(
         
         rsi = indicators.get("rsi", 50.0)
         ema_9 = indicators.get("ema_9", 0.0)
-        ema_21 = indicators.get("ema_21", 0.0)
+        ema_20 = indicators.get("ema_20", 0.0)
         atr = indicators.get("atr", 0.0)
         close = indicators.get("close", ema_9)  # Use EMA9 as fallback
         volume = indicators.get("volume", 0.0)
@@ -97,7 +97,7 @@ def calculate_optimal_entry(
                 entry_reason = "Normal entry zone"
             
             # Risk/reward targets
-            stop_loss = ema_21 * 0.998  # Below EMA21
+            stop_loss = ema_20 * 0.998  # Below EMA20
             take_profit_conservative = entry_price + (atr * 1.5)  # 1.5 ATR
             take_profit_aggressive = entry_price + (atr * 3.0)  # 3.0 ATR
             
@@ -126,7 +126,7 @@ def calculate_optimal_entry(
                 entry_price = close
                 entry_reason = "Normal entry zone"
             
-            stop_loss = ema_21 * 1.002  # Above EMA21
+            stop_loss = ema_20 * 1.002  # Above EMA20
             take_profit_conservative = entry_price - (atr * 1.5)
             take_profit_aggressive = entry_price - (atr * 3.0)
         
@@ -173,8 +173,12 @@ def classify_trade_type(
         Dict with trade_type, grade, characteristics, hold_time_estimate
     """
     try:
-        # Extract indicators from nested structure
-        indicators = payload.get("indicators", {})
+        # Extract indicators from either nested or flat structure
+        if "indicators" in payload and isinstance(payload["indicators"], dict):
+            indicators = payload["indicators"]
+        else:
+            # Flat format - extract from top level
+            indicators = payload
         
         rsi = indicators.get("rsi", 50.0)
         atr = indicators.get("atr", 0.0)
@@ -182,7 +186,7 @@ def classify_trade_type(
         macd_signal = indicators.get("macd_signal", 0.0)
         volume = indicators.get("volume", 0.0)
         ema_9 = indicators.get("ema_9", 0.0)
-        ema_21 = indicators.get("ema_21", 0.0)
+        ema_20 = indicators.get("ema_20", 0.0)
         ema_200 = indicators.get("ema_200", 0.0)
         
         # Get TF alignment strength
@@ -194,7 +198,7 @@ def classify_trade_type(
         
         # Trend structure: how aligned are EMAs
         if ema_200:
-            macro_trend_strength = (ema_21 - ema_200) / ema_200 * 100
+            macro_trend_strength = (ema_20 - ema_200) / ema_200 * 100
         else:
             macro_trend_strength = 0
         
