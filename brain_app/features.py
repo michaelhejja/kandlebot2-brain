@@ -485,8 +485,10 @@ def _check_1h_alignment_with_reason(candle: dict, signal_type: str) -> tuple[boo
     rsi = candle.get("rsi")
     
     if None in [ema_20, ema_50, ema_200, rsi] or not adx:
-        missing = [k for k, v in {"ema_20": ema_20, "ema_50": ema_50, "ema_200": ema_200, "adx": adx, "rsi": rsi}.items() if v is None]
-        return False, f"Missing: {missing}"
+        missing = [k for k, v in {"ema_20": ema_20, "ema_50": ema_50, "ema_200": ema_200, "rsi": rsi}.items() if v is None]
+        if not adx:
+            missing.append("adx")
+        return False, f"1h: Missing: {missing}" if missing else "1h: No ADX data"
     
     # Check trend strength (ADX) - hard requirement for alignment
     # EMA positions are informational only (confluence can override)
