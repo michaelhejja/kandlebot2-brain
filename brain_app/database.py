@@ -51,6 +51,36 @@ CREATE INDEX IF NOT EXISTS idx_candles_symbol_time
 ON candles(symbol, timestamp DESC);
 """
 
+# SQL schema for reversals table (tracks all detected reversals for confluence analysis)
+REVERSALS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS reversals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    timestamp DATETIME NOT NULL,
+    
+    -- Reversal signal metadata
+    signal TEXT NOT NULL,  -- 'BUY' or 'SELL'
+    reversal_type TEXT,     -- 'CONVERGENCE_BOUNCE', 'CLASSIC_DIVERGENCE', etc.
+    confidence REAL NOT NULL,  -- 0-100
+    
+    -- Trend analysis at time of reversal
+    price_trend REAL,  -- -100 to +100
+    mfi_trend REAL,    -- -100 to +100
+    
+    -- Metadata
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    
+    UNIQUE(symbol, timeframe, timestamp, signal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reversals_symbol_signal_time
+ON reversals(symbol, signal, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_reversals_symbol_time
+ON reversals(symbol, timestamp DESC);
+"""
+
 # Timeframe definitions in minutes
 TIMEFRAMES = {
     "1m": 1,
@@ -80,6 +110,7 @@ class Database:
         """Create tables and indexes if they don't exist."""
         with self.get_connection() as conn:
             conn.executescript(CANDLES_SCHEMA)
+            conn.executescript(REVERSALS_SCHEMA)
             conn.commit()
         logger.info(f"Database initialized at {self.db_path}")
 
@@ -305,3 +336,104 @@ class Database:
                 gaps.append((expected_next, now))
         
         return gaps
+
+    def insert_reversal(
+        self,
+        symbol: str,
+        timeframe: str,
+        timestamp: datetime,
+        signal: str,
+        confidence: float,
+        reversal_type: str | None = None,
+        price_trend: float | None = None,
+        mfi_trend: float | None = None,
+    ) -> None:
+        """Record a detected reversal signal for confluence analysis.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., 'ETH').
+            timeframe: Candle timeframe (e.g., '1m', '5m').
+            timestamp: Candle timestamp when reversal detected.
+            signal: 'BUY' or 'SELL'.
+            confidence: Confidence level (0-100).
+            reversal_type: Pattern type (e.g., 'CONVERGENCE_BOUNCE').
+            price_trend: Price trend score (-100 to +100).
+            mfi_trend: MFI trend score (-100 to +100).
+        """
+        with self.get_connection() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO reversals (
+                        symbol, timeframe, timestamp, signal, confidence,
+                        reversal_type, price_trend, mfi_trend
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        symbol,
+                        timeframe,
+                        timestamp.isoformat(),
+                        signal,
+                        confidence,
+                        reversal_type,
+                        price_trend,
+                        mfi_trend,
+                    ),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                # Reversal already exists; skip to avoid duplicates
+                logger.debug(
+                    f"Reversal already recorded for {symbol} {timeframe} "
+                    f"at {timestamp} signal={signal}"
+                )
+
+    def get_recent_reversals(
+        self,
+        symbol: str,
+        signal_type: str | None = None,
+        lookback_minutes: int = 120,
+    ) -> list[dict]:
+        """Fetch recent reversals for confluence analysis.
+        
+        Args:
+            symbol: Trading pair symbol.
+            signal_type: Filter by 'long' (BUY) or 'short' (SELL), or None for all.
+            lookback_minutes: How many minutes back to check.
+            
+        Returns:
+            List of reversal dicts, ordered by timestamp descending (newest first).
+        """
+        now = datetime.now(timezone.utc)
+        start_time = now - timedelta(minutes=lookback_minutes)
+        
+        # Map signal_type to BUY/SELL
+        signal_filter = None
+        if signal_type == "long":
+            signal_filter = "BUY"
+        elif signal_type == "short":
+            signal_filter = "SELL"
+        
+        with self.get_connection() as conn:
+            if signal_filter:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM reversals
+                    WHERE symbol = ? AND signal = ? AND timestamp >= ?
+                    ORDER BY timestamp DESC
+                    LIMIT 100
+                    """,
+                    (symbol, signal_filter, start_time.isoformat()),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM reversals
+                    WHERE symbol = ? AND timestamp >= ?
+                    ORDER BY timestamp DESC
+                    LIMIT 100
+                    """,
+                    (symbol, start_time.isoformat()),
+                ).fetchall()
+            
+            return [dict(row) for row in rows]

@@ -146,6 +146,84 @@ def sync_candle():
         return jsonify(error=f"Error storing candle: {str(e)}"), 500
 
 
+@api_bp.post("/reversal")
+def record_reversal():
+    """Record a detected reversal signal for confluence analysis.
+    
+    Payload:
+    {
+        "symbol": "ETH",
+        "timeframe": "1m",
+        "timestamp": "1787869260",  # Unix epoch or ISO 8601
+        "signal": "BUY",  # or "SELL"
+        "confidence": 65,  # 0-100
+        "reversal_type": "CONVERGENCE_BOUNCE",
+        "price_trend": 79.72,
+        "mfi_trend": 11.25
+    }
+    
+    Returns: {"status": "ok", "reversal_recorded": true}
+    """
+    if not _check_api_key():
+        return jsonify(error="Unauthorized"), 401
+
+    payload = request.get_json(silent=True)
+    
+    try:
+        # Validate required fields
+        required = ["symbol", "timeframe", "timestamp", "signal", "confidence"]
+        for field in required:
+            if field not in payload:
+                raise ValueError(f"Missing required field: '{field}'")
+        
+        # Parse timestamp
+        try:
+            ts_val = payload["timestamp"]
+            if isinstance(ts_val, str) and ts_val.isdigit():
+                # Unix epoch in seconds
+                timestamp = datetime.fromtimestamp(int(ts_val), tz=timezone.utc)
+            elif isinstance(ts_val, (int, float)):
+                # Unix epoch (numeric)
+                timestamp = datetime.fromtimestamp(ts_val, tz=timezone.utc)
+            else:
+                # ISO 8601
+                timestamp = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid timestamp format: {ts_val}") from e
+        
+        # Record the reversal
+        current_app.db.insert_reversal(
+            symbol=payload["symbol"],
+            timeframe=payload["timeframe"],
+            timestamp=timestamp,
+            signal=payload["signal"],
+            confidence=float(payload["confidence"]),
+            reversal_type=payload.get("reversal_type"),
+            price_trend=float(payload.get("price_trend", 0)) if payload.get("price_trend") else None,
+            mfi_trend=float(payload.get("mfi_trend", 0)) if payload.get("mfi_trend") else None,
+        )
+        
+        logger.info(
+            f"Recorded reversal for {payload['symbol']} {payload['timeframe']} "
+            f"at {timestamp}: {payload['signal']} ({payload['confidence']}%)"
+        )
+        
+        return jsonify(
+            status="ok",
+            symbol=payload["symbol"],
+            timeframe=payload["timeframe"],
+            timestamp=timestamp.isoformat(),
+            reversal_recorded=True,
+        ), 201
+    
+    except ValueError as e:
+        logger.error(f"Invalid value in reversal payload: {e}")
+        return jsonify(error=f"Invalid value: {str(e)}"), 400
+    except Exception as e:
+        logger.error(f"Error recording reversal: {e}", exc_info=True)
+        return jsonify(error=f"Error recording reversal: {str(e)}"), 500
+
+
 @api_bp.post("/bulk-sync")
 def bulk_sync_candles():
     """Receive multiple historical candles and store them all at once.
@@ -286,20 +364,40 @@ def analyze():
         f"score={tf_alignment['tf_alignment_score']}, details={tf_alignment['details']}"
     )
     
-    # Step 2: Hard reject if insufficient alignment (score < 2)
-    if tf_alignment["tf_alignment_score"] < 2:
+    # Step 1b: Calculate reversal confluence (signal agreement from recent reversals)
+    from brain_app.features import calculate_reversal_confluence
+    confluence = calculate_reversal_confluence(
+        current_app.db,
+        payload["symbol"],
+        payload["signal_type"],
+        lookback_minutes=120  # Last 2 hours
+    )
+    logger.info(
+        f"Reversal confluence for {payload['symbol']} ({payload['signal_type']}): "
+        f"level={confluence['confluence_level']}, ratio={confluence['confluence_ratio']}, "
+        f"boost={confluence['confidence_boost']}%"
+    )
+    
+    # Step 2: Soft rejection with confluence override
+    # If confluence is very_high or high, proceed even with low TF alignment
+    confluence_level = confluence.get('confluence_level', 'none')
+    tf_score = tf_alignment["tf_alignment_score"]
+    
+    if tf_score < 2 and confluence_level not in ['very_high', 'high']:
+        # Hard reject: poor alignment AND poor confluence
         return jsonify(
             symbol=payload["symbol"],
             signal_type=payload["signal_type"],
             decision="reject",
             confidence=0.0,
             model_used="multi_tf_filter",
-            reason="insufficient_timeframe_alignment",
+            reason="insufficient_timeframe_alignment_and_confluence",
             # Diagnostic info
-            tf_alignment_score=tf_alignment["tf_alignment_score"],
+            tf_alignment_score=tf_score,
             tf_alignment_details=tf_alignment["details"],
-            # DETAILED FAILURE REASONS
             per_timeframe_checks=tf_alignment.get("detailed_checks", {}),
+            # New: Confluence details
+            confluence_analysis=confluence,
             diagnostic={
                 "message": f"TF Score {tf_alignment['tf_alignment_score']}/4 - Need ≥2 for analysis",
                 "primary_tfs_status": {
@@ -331,17 +429,23 @@ def analyze():
         )
         raw_confidence = float(classifier.pipeline.predict_proba(row)[0][1])
         
-        # Adjust decision threshold based on alignment score
+        # Adjust decision threshold based on alignment score AND confluence
         # Higher alignment = higher confidence requirement (stricter)
         # Score 4: require 0.75 (only take strongest signals when perfect alignment)
         # Score 3: require 0.60 (moderate threshold when 3 TFs confirm)
         # Score 2: require 0.45 (lenient threshold when only 2 TFs confirm)
+        # Score 1: normally reject, but proceed with high confluence
+        # Score 0: only proceed if confluence is very_high
         if tf_alignment["tf_alignment_score"] >= 4:
             threshold = 0.75
         elif tf_alignment["tf_alignment_score"] == 3:
             threshold = 0.60
-        else:  # score == 2
+        elif tf_alignment["tf_alignment_score"] == 2:
             threshold = 0.45
+        elif tf_alignment["tf_alignment_score"] == 1 and confluence_level == 'very_high':
+            threshold = 0.40  # Allow low TF score if confluence very strong
+        else:
+            threshold = 0.55  # Default stricter threshold
         
         decision = "accept" if raw_confidence >= threshold else "reject"
         
@@ -357,7 +461,21 @@ def analyze():
             # Good alignment + strong model agreement = moderate boost
             confidence = min(0.85, raw_confidence + 0.10)
         
+        # CONFLUENCE BOOST: Add confidence based on reversal agreement
+        # Very high confluence (85%+): +40% confidence boost
+        # High confluence (70-84%): +30% confidence boost
+        # Medium confluence (55-69%): +15% confidence boost
+        # Low confluence (40-54%): +5% confidence boost
+        confluence_boost_pct = confluence.get('confidence_boost', 0) / 100.0  # Convert to decimal
+        confidence += confluence_boost_pct
+        confidence = min(0.99, confidence)  # Cap at 99%
+        
         confidence = round(confidence, 4)
+        
+        logger.info(
+            f"Confidence calculation: raw={raw_confidence:.3f} + tf_boost={tf_alignment['tf_alignment_score']} + "
+            f"confluence_boost={confluence_boost_pct:.2f} = final={confidence:.3f}"
+        )
     else:
         # Fallback to heuristic
         rsi = features.get("rsi", 50.0)
@@ -415,4 +533,6 @@ def analyze():
         entry_guidance=entry_analysis,
         # Trade classification
         trade_classification=trade_classification,
+        # Confluence analysis (new: tracks reversal signal agreement)
+        confluence_analysis=confluence,
     ), 200

@@ -846,6 +846,108 @@ def build_feature_vector(payload: dict[str, Any], tf_features: dict | None = Non
     return features
 
 
+def calculate_reversal_confluence(
+    db,
+    symbol: str,
+    signal_type: str,
+    lookback_minutes: int = 120,
+) -> dict[str, Any]:
+    """Calculate confluence score based on recent reversal signals.
+    
+    Confluence = how many recent reversals agree with the current signal.
+    More confluence = higher confidence for entry.
+    
+    Example:
+    - Signal: SHORT (expecting price down)
+    - Recent reversals in last 2 hours: 8 SELL signals, 2 BUY signals
+    - Confluence: 8 matching + 2 conflicting = 80% alignment
+    - Confidence boost: +30% (strong confluence)
+    
+    Args:
+        db: Database instance.
+        symbol: Trading pair symbol.
+        signal_type: 'long' or 'short'.
+        lookback_minutes: Time window to check (default 2 hours).
+        
+    Returns:
+        Dict with:
+        {
+            'confluent_count': int,  # Number of reversals matching signal
+            'conflicting_count': int,  # Number opposing signal
+            'total_reversals': int,  # Total reversals in window
+            'confluence_ratio': float,  # confluent / total (0-1)
+            'confidence_boost': float,  # Percentage points to add (0-40)
+            'confluence_level': str,  # 'very_high', 'high', 'medium', 'low', 'none'
+        }
+    """
+    try:
+        # Get recent reversals for this symbol
+        reversals = db.get_recent_reversals(
+            symbol=symbol,
+            signal_type=None,  # Get all reversals
+            lookback_minutes=lookback_minutes,
+        )
+        
+        if not reversals:
+            return {
+                'confluent_count': 0,
+                'conflicting_count': 0,
+                'total_reversals': 0,
+                'confluence_ratio': 0.0,
+                'confidence_boost': 0.0,
+                'confluence_level': 'none',
+            }
+        
+        # Map signal_type to expected reversal signal
+        expected_signal = "BUY" if signal_type == "long" else "SELL"
+        
+        # Count confluent vs conflicting reversals
+        confluent_count = sum(1 for r in reversals if r['signal'] == expected_signal)
+        conflicting_count = len(reversals) - confluent_count
+        total_reversals = len(reversals)
+        
+        # Calculate confluence ratio (0-1)
+        confluence_ratio = confluent_count / total_reversals if total_reversals > 0 else 0
+        
+        # Determine confidence boost based on confluence
+        if confluence_ratio >= 0.85:  # 85%+ agreement
+            confluence_level = 'very_high'
+            confidence_boost = 40.0  # Maximum boost
+        elif confluence_ratio >= 0.70:  # 70-84% agreement
+            confluence_level = 'high'
+            confidence_boost = 30.0
+        elif confluence_ratio >= 0.55:  # 55-69% agreement
+            confluence_level = 'medium'
+            confidence_boost = 15.0
+        elif confluence_ratio >= 0.40:  # 40-54% agreement
+            confluence_level = 'low'
+            confidence_boost = 5.0
+        else:  # Less than 40% agreement
+            confluence_level = 'none'
+            confidence_boost = 0.0
+        
+        return {
+            'confluent_count': confluent_count,
+            'conflicting_count': conflicting_count,
+            'total_reversals': total_reversals,
+            'confluence_ratio': round(confluence_ratio, 3),
+            'confidence_boost': confidence_boost,
+            'confluence_level': confluence_level,
+        }
+    
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error calculating confluence: {e}", exc_info=True)
+        return {
+            'confluent_count': 0,
+            'conflicting_count': 0,
+            'total_reversals': 0,
+            'confluence_ratio': 0.0,
+            'confidence_boost': 0.0,
+            'confluence_level': 'error',
+        }
+
+
 def analyze_reversal_signals(payload: dict[str, Any], signal_type: str) -> dict[str, Any]:
     """Analyze reversal signals and determine how they align with the trade signal.
     
