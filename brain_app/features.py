@@ -482,28 +482,23 @@ def _check_1h_alignment_with_reason(candle: dict, signal_type: str) -> tuple[boo
         missing = [k for k, v in {"ema_20": ema_20, "ema_50": ema_50, "ema_200": ema_200, "adx": adx, "rsi": rsi}.items() if v is None]
         return False, f"Missing: {missing}"
     
+    # Check trend strength (ADX) - hard requirement for alignment
+    # EMA positions are informational only (confluence can override)
     adx_check = adx > 20
     
+    info = []
     if signal_type == "long":
-        if not (ema_20 > ema_50):
-            return False, f"EMA20 ({ema_20:.2f}) ≤ EMA50 ({ema_50:.2f}) - need EMA20 > EMA50"
-        if not (ema_50 > ema_200):
-            return False, f"EMA50 ({ema_50:.2f}) ≤ EMA200 ({ema_200:.2f}) - need EMA50 > EMA200"
-        if not adx_check:
-            return False, f"ADX ({adx:.2f}) ≤ 20 - need trend strength"
-        if not (rsi > 40):
-            return False, f"RSI ({rsi:.2f}) ≤ 40 - too weak"
-        return True, f"Full EMA hierarchy and ADX > 20 ✓"
+        ema_quality = "✓" if ema_20 > ema_50 > ema_200 else "✗"
+        info.append(f"EMA hierarchy: {ema_quality} (20:{ema_20:.0f} 50:{ema_50:.0f} 200:{ema_200:.0f})")
+        info.append(f"Trend strength: ADX {adx:.0f} {'✓strong' if adx_check else '✗weak'}")
+        info.append(f"RSI: {rsi:.0f} {'✓' if rsi > 40 else '✗'}")
+        return adx_check, f"1h: {' | '.join(info)}"
     else:  # short
-        if not (ema_20 < ema_50):
-            return False, f"EMA20 ({ema_20:.2f}) ≥ EMA50 ({ema_50:.2f}) - need EMA20 < EMA50"
-        if not (ema_50 < ema_200):
-            return False, f"EMA50 ({ema_50:.2f}) ≥ EMA200 ({ema_200:.2f}) - need EMA50 < EMA200"
-        if not adx_check:
-            return False, f"ADX ({adx:.2f}) ≤ 20 - need trend strength"
-        if not (rsi < 60):
-            return False, f"RSI ({rsi:.2f}) ≥ 60 - too strong"
-        return True, f"Full EMA hierarchy and ADX > 20 ✓"
+        ema_quality = "✓" if ema_20 < ema_50 < ema_200 else "✗"
+        info.append(f"EMA hierarchy: {ema_quality} (20:{ema_20:.0f} 50:{ema_50:.0f} 200:{ema_200:.0f})")
+        info.append(f"Trend strength: ADX {adx:.0f} {'✓strong' if adx_check else '✗weak'}")
+        info.append(f"RSI: {rsi:.0f} {'✓' if rsi < 60 else '✗'}")
+        return adx_check, f"1h: {' | '.join(info)}"
 
 
 def _check_4h_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
@@ -520,22 +515,20 @@ def _check_4h_alignment_with_reason(candle: dict, signal_type: str) -> tuple[boo
         missing = [k for k, v in {"ema_50": ema_50, "ema_200": ema_200, "close": close, "rsi": rsi}.items() if v is None]
         return False, f"Missing: {missing}"
     
+    # EMA positions are informational (confluence can override)
+    # Check for extreme RSI only
     if signal_type == "long":
-        if not (ema_50 > ema_200):
-            return False, f"EMA50 ({ema_50:.2f}) ≤ EMA200 ({ema_200:.2f}) - need macro uptrend"
-        if not (close > ema_200):
-            return False, f"Close ({close:.2f}) ≤ EMA200 ({ema_200:.2f}) - price below 200MA"
-        if not (rsi > 50):
-            return False, f"RSI ({rsi:.2f}) ≤ 50 - weak momentum"
-        return True, f"Macro trend aligned ✓"
+        ema_ok = ema_50 > ema_200
+        price_ok = close > ema_200
+        rsi_extreme = rsi < 20  # Oversold = hard reject
+        info = f"4h macro: EMA50 vs 200M {'✓' if ema_ok else '✗'} | Price {'✓ above' if price_ok else '✗ below'} 200MA | RSI {rsi:.0f}"
+        return not rsi_extreme, info
     else:  # short
-        if not (ema_50 < ema_200):
-            return False, f"EMA50 ({ema_50:.2f}) ≥ EMA200 ({ema_200:.2f}) - need macro downtrend"
-        if not (close < ema_200):
-            return False, f"Close ({close:.2f}) ≥ EMA200 ({ema_200:.2f}) - price above 200MA"
-        if not (rsi < 50):
-            return False, f"RSI ({rsi:.2f}) ≥ 50 - strong momentum"
-        return True, f"Macro trend aligned ✓"
+        ema_ok = ema_50 < ema_200
+        price_ok = close < ema_200
+        rsi_extreme = rsi > 80  # Overbought = hard reject
+        info = f"4h macro: EMA50 vs 200M {'✓' if ema_ok else '✗'} | Price {'✓ below' if price_ok else '✗ above'} 200MA | RSI {rsi:.0f}"
+        return not rsi_extreme, info
 
 
 def _check_12h_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
@@ -550,14 +543,14 @@ def _check_12h_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bo
         missing = [k for k, v in {"ema_200": ema_200, "close": close}.items() if v is None]
         return False, f"Missing: {missing}"
     
+    # Macro trend (12h) - informational only, confluence can override
+    # Always return True for data availability, report position diagnostically
     if signal_type == "long":
-        if not (close > ema_200):
-            return False, f"Close ({close:.2f}) ≤ EMA200 ({ema_200:.2f}) - bearish macro"
-        return True, f"Long-term bullish ✓"
+        price_pos = "✓ above" if close > ema_200 else "✗ below"
+        return True, f"12h macro: Price {price_pos} 200MA (EMA200: {ema_200:.0f})"
     else:  # short
-        if not (close < ema_200):
-            return False, f"Close ({close:.2f}) ≥ EMA200 ({ema_200:.2f}) - bullish macro"
-        return True, f"Long-term bearish ✓"
+        price_pos = "✓ below" if close < ema_200 else "✗ above"
+        return True, f"12h macro: Price {price_pos} 200MA (EMA200: {ema_200:.0f})"
 
 
 def _check_5m_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
@@ -573,13 +566,11 @@ def _check_5m_alignment_with_reason(candle: dict, signal_type: str) -> tuple[boo
         return False, f"Missing: {missing}"
     
     if signal_type == "long":
-        if not (ema_9 > ema_20):
-            return False, f"EMA9 ({ema_9:.2f}) ≤ EMA20 ({ema_20:.2f})"
-        return True, f"5m scalp uptrend ✓"
+        status = "✓ bullish" if ema_9 > ema_20 else "✗ bearish"
+        return True, f"5m trend: {status} (EMA9: {ema_9:.0f}, EMA20: {ema_20:.0f})"
     else:  # short
-        if not (ema_9 < ema_20):
-            return False, f"EMA9 ({ema_9:.2f}) ≥ EMA20 ({ema_20:.2f})"
-        return True, f"5m scalp downtrend ✓"
+        status = "✓ bearish" if ema_9 < ema_20 else "✗ bullish"
+        return True, f"5m trend: {status} (EMA9: {ema_9:.0f}, EMA20: {ema_20:.0f})"
 
 
 def _check_15m_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
@@ -597,17 +588,13 @@ def _check_15m_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bo
         return False, f"Missing: {missing}"
     
     if signal_type == "long":
-        if ema_20 <= ema_50:
-            return False, f"EMA20 ({ema_20:.2f}) ≤ EMA50 ({ema_50:.2f})"
-        if close <= ema_9:
-            return False, f"Close ({close:.2f}) ≤ EMA9 ({ema_9:.2f})"
-        return True, f"15m swing uptrend ✓"
+        ema_qual = "✓" if ema_20 > ema_50 else "✗"
+        price_qual = "✓" if close > ema_9 else "✗"
+        return True, f"15m swing: EMA20>50 {ema_qual} | Price>EMA9 {price_qual}"
     else:  # short
-        if ema_20 >= ema_50:
-            return False, f"EMA20 ({ema_20:.2f}) ≥ EMA50 ({ema_50:.2f})"
-        if close >= ema_9:
-            return False, f"Close ({close:.2f}) ≥ EMA9 ({ema_9:.2f})"
-        return True, f"15m swing downtrend ✓"
+        ema_qual = "✓" if ema_20 < ema_50 else "✗"
+        price_qual = "✓" if close < ema_9 else "✗"
+        return True, f"15m swing: EMA20<50 {ema_qual} | Price<EMA9 {price_qual}"
 
 
 def _check_30m_alignment(candle: dict, signal_type: str) -> bool:
