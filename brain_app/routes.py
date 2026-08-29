@@ -312,6 +312,10 @@ def bulk_sync_candles():
             for field in indicator_fields:
                 if field in candle:
                     indicators[field] = candle[field]
+            
+            # Handle ADX: if it's a dict {adx, pdi, mdi}, extract just the adx value
+            if "adx" in indicators and isinstance(indicators["adx"], dict):
+                indicators["adx"] = indicators["adx"].get("adx", 0)
 
             # Extract timeframe (optional, defaults to "1m")
             timeframe = candle.get("timeframe", "1m")
