@@ -514,7 +514,7 @@ def analyze():
     from brain_app.features import calculate_optimal_entry, classify_trade_type
     
     entry_analysis = calculate_optimal_entry(payload)
-    trade_classification = classify_trade_type(payload, tf_alignment)
+    trade_classification = classify_trade_type(payload, tf_alignment, confluence_level=confluence_level)
     
     return jsonify(
         symbol=payload["symbol"],

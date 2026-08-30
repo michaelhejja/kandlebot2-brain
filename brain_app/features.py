@@ -158,6 +158,7 @@ def calculate_optimal_entry(
 def classify_trade_type(
     payload: dict,
     tf_alignment: dict,
+    confluence_level: str = "none",  # NEW: confluence level from calculate_reversal_confluence
 ) -> dict[str, Any]:
     """Classify trade as scalp, swing, or trend-start with grade A/B/C.
     
@@ -168,6 +169,7 @@ def classify_trade_type(
     Args:
         payload: Full payload dict with symbol, signal_type, indicators
         tf_alignment: TF alignment dict with score and individual TF flags
+        confluence_level: Confluence strength ('very_high', 'high', 'medium', 'low', 'none')
         
     Returns:
         Dict with trade_type, grade, characteristics, hold_time_estimate
@@ -307,6 +309,22 @@ def classify_trade_type(
             characteristics = ["Weak setup", "Low probability"]
             hold_time = "5-15 minutes"
             risk_level = "High"
+        
+        # NEW: Apply confluence-based grade upgrades
+        # When multiple recent signals agree, upgrade the grade to reflect conviction
+        if confluence_level == "very_high":
+            # 85%+ consensus = strong validation, upgrade any grade
+            if grade == "C":
+                grade = "B"
+            elif grade == "B":
+                grade = "A"
+            # A stays A
+        elif confluence_level == "high":
+            # 70-84% consensus = good validation, but don't upgrade B→A
+            if grade == "C":
+                grade = "B"
+            # B and A stay the same
+        # medium/low/none confluence: no grade upgrade
         
         return {
             "trade_type": trade_type,
