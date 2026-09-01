@@ -15,6 +15,7 @@ from .features import (
     calculate_reversal_weighted_decision,
 )
 from .decision_smoothing import smooth_decision
+from .hunting_mode import record_trend_start, get_hunting_mode_status
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,32 @@ def health():
         status="ok",
         model_loaded=classifier.is_trained_model,
     )
+
+
+@api_bp.get("/debug/hunting-mode")
+def debug_hunting_mode():
+    """Get all active hunting mode signals (debug endpoint)."""
+    from .hunting_mode import get_active_hunting_signals
+    
+    signals = get_active_hunting_signals()
+    return jsonify(
+        active_signals=signals,
+        total_active=len(signals),
+    ), 200
+
+
+@api_bp.delete("/debug/hunting-mode")
+def debug_clear_hunting_mode():
+    """Clear hunting mode cache (debug endpoint)."""
+    from .hunting_mode import clear_hunting_mode
+    
+    symbol = request.args.get("symbol", None)
+    clear_hunting_mode(symbol)
+    
+    return jsonify(
+        status="ok",
+        cleared=symbol or "all",
+    ), 200
 
 
 @api_bp.post("/sync")
@@ -539,6 +566,33 @@ def analyze():
     # First classify trade type to know which TP strategy to use
     trade_classification = classify_trade_type(payload, tf_alignment, confluence_level=confluence_level)
     
+    # Step 6a: HUNTING MODE - Check if we're in an inflection zone after TREND_START
+    # If this is a TREND_START signal, record it to activate hunting mode for follow-ups
+    trade_type = trade_classification.get("trade_type", "SCALP")
+    trade_grade = trade_classification.get("grade", "C")
+    
+    if trade_type == "TREND_START" and decision == "accept":
+        # Record this TREND_START to activate hunting mode
+        record_trend_start(
+            symbol=payload["symbol"],
+            direction=payload["signal_type"],
+            confidence=confidence,
+            grade=trade_grade
+        )
+        logger.info(f"🎯 TREND_START recorded for hunting mode activation")
+    
+    # Check if we're currently in hunting mode from a previous TREND_START
+    hunting_status = get_hunting_mode_status(payload["symbol"], payload["signal_type"])
+    
+    # Apply hunting mode boost if aligned
+    if hunting_status["is_hunting"] and hunting_status["direction_aligned"]:
+        pre_hunting_confidence = confidence
+        confidence = min(0.99, confidence + hunting_status["confidence_boost"])
+        logger.info(
+            f"🎯 HUNTING MODE ALIGNED: {payload['symbol']} {payload['signal_type']} | "
+            f"Boosted {pre_hunting_confidence:.2%} → {confidence:.2%} (+{hunting_status['confidence_boost']:.0%})"
+        )
+    
     # Then calculate entry with EMA200-based TPs based on trade type
     entry_analysis = calculate_optimal_entry(
         payload,
@@ -573,4 +627,6 @@ def analyze():
         trade_classification=trade_classification,
         # Confluence analysis (new: tracks reversal signal agreement)
         confluence_analysis=confluence,
+        # Hunting mode (tracks TREND_START inflection zones)
+        hunting_mode=hunting_status,
     ), 200
