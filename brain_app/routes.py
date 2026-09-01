@@ -536,8 +536,15 @@ def analyze():
     # Step 6: Calculate optimal entry price and timing
     from brain_app.features import calculate_optimal_entry, classify_trade_type
     
-    entry_analysis = calculate_optimal_entry(payload)
+    # First classify trade type to know which TP strategy to use
     trade_classification = classify_trade_type(payload, tf_alignment, confluence_level=confluence_level)
+    
+    # Then calculate entry with EMA200-based TPs based on trade type
+    entry_analysis = calculate_optimal_entry(
+        payload,
+        trade_type=trade_classification.get("trade_type", "SCALP"),
+        candle_store=current_app.candle_store
+    )
     
     return jsonify(
         symbol=payload["symbol"],

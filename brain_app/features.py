@@ -34,23 +34,48 @@ class PayloadValidationError(ValueError):
     """Raised when an incoming /analyze request is missing required fields."""
 
 
+def _get_multi_tf_ema200(symbol: str, candle_store) -> dict[str, float]:
+    """Get EMA200 values from all available timeframes for a symbol.
+    
+    Returns dict like: {"1m": 2500.5, "5m": 2500.2, "15m": 2499.8, ...}
+    """
+    ema200_by_tf = {}
+    timeframes = ["1m", "5m", "15m", "30m", "1h", "4h", "12h"]
+    
+    try:
+        for tf in timeframes:
+            latest_candle = candle_store.get_latest_candle(symbol, tf)
+            if latest_candle and latest_candle.get("indicators"):
+                ema200 = latest_candle["indicators"].get("ema_200")
+                if ema200:
+                    ema200_by_tf[tf] = ema200
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug(f"Could not fetch multi-TF EMA200: {e}")
+    
+    return ema200_by_tf
+
+
 def calculate_optimal_entry(
     payload: dict,
-    candles_1h: dict | None = None,
+    trade_type: str = "SCALP",
+    candle_store = None,
 ) -> dict[str, Any]:
-    """Calculate optimal entry price and timing recommendation.
+    """Calculate optimal entry price and EMA200-based take profit targets.
     
-    Analyzes current price, ATR, and RSI to recommend:
-    - ENTER_NOW: Price at support, good momentum
-    - WAIT_FOR_DIP: Price elevated, wait for pullback
-    - WAIT_FOR_BREAKOUT: Price consolidating, wait for confirmation
+    Uses EMA200 levels across multiple timeframes as natural return points.
+    Strategy varies by trade type:
+    - SCALP: Conservative = EMA200 on 1m/5m/15m, Aggressive = break below
+    - SWING: Conservative = EMA200 on 30m/1h, Aggressive = EMA200 on 4h/12h
+    - TREND_START: Conservative = EMA200 on 4h/12h, Aggressive = higher TF
     
     Args:
         payload: Full payload dict with symbol, signal_type, indicators
-        candles_1h: Optional 1h candle for support/resistance analysis
+        trade_type: Type of trade (SCALP, SWING, TREND_START) for TP calculation
+        candle_store: Database access to fetch multi-timeframe EMA200 data
         
     Returns:
-        Dict with entry_recommendation, entry_price, stop_loss, take_profit
+        Dict with entry_recommendation, entry_price, stop_loss, take_profit targets
     """
     try:
         # Extract indicators from either nested or flat structure
@@ -60,21 +85,28 @@ def calculate_optimal_entry(
             # Flat format - extract from top level
             indicators = payload
         
+        symbol = payload.get("symbol", "ETH")
         signal_type = payload.get("signal_type", "long")
         
         rsi = indicators.get("rsi", 50.0)
         ema_9 = indicators.get("ema_9", 0.0)
         ema_20 = indicators.get("ema_20", 0.0)
+        ema_200 = indicators.get("ema_200", 0.0)
         atr = indicators.get("atr", 0.0)
         close = indicators.get("close", ema_9)  # Use EMA9 as fallback
         volume = indicators.get("volume", 0.0)
         
+        # Get multi-timeframe EMA200 levels for TP calculation
+        ema200_by_tf = {}
+        if candle_store:
+            ema200_by_tf = _get_multi_tf_ema200(symbol, candle_store)
+        
+        # Calculate take profit targets based on trade type and EMA200 levels
         if signal_type == "long":
             # LONG signal entry logic
-            # Check if price is near support (EMA9)
             distance_from_ema9 = ((ema_9 - close) / ema_9 * 100) if ema_9 else 0
             
-            # Recommendation based on position and RSI
+            # Entry recommendation
             if distance_from_ema9 > 0.5:  # Below EMA9 = good entry
                 recommendation = "ENTER_NOW"
                 entry_price = close
@@ -96,11 +128,52 @@ def calculate_optimal_entry(
                 entry_price = close
                 entry_reason = "Normal entry zone"
             
-            # Risk/reward targets
             stop_loss = ema_20 * 0.998  # Below EMA20
-            take_profit_conservative = entry_price + (atr * 1.5)  # 1.5 ATR
-            take_profit_aggressive = entry_price + (atr * 3.0)  # 3.0 ATR
             
+            # Calculate take profits based on trade type using EMA200 levels
+            if trade_type == "SCALP":
+                # SCALP: Conservative = return to EMA200 on 1m/5m/15m
+                conservative_emas = [ema200_by_tf.get(tf) for tf in ["1m", "5m", "15m"] if tf in ema200_by_tf]
+                if conservative_emas:
+                    take_profit_conservative = min(conservative_emas)  # Closest EMA200 level
+                else:
+                    take_profit_conservative = entry_price + (atr * 1.5)  # Fallback to ATR
+                
+                # Aggressive = break below EMA200 on higher timeframe
+                if "30m" in ema200_by_tf:
+                    take_profit_aggressive = ema200_by_tf["30m"] * 0.995  # Just below 30m EMA200
+                else:
+                    take_profit_aggressive = entry_price + (atr * 3.0)  # Fallback
+                    
+            elif trade_type == "SWING":
+                # SWING: Conservative = return to EMA200 on 30m/1h
+                conservative_emas = [ema200_by_tf.get(tf) for tf in ["30m", "1h"] if tf in ema200_by_tf]
+                if conservative_emas:
+                    take_profit_conservative = min(conservative_emas)
+                else:
+                    take_profit_conservative = entry_price + (atr * 2.0)  # Fallback
+                
+                # Aggressive = return to EMA200 on 4h/12h
+                aggressive_emas = [ema200_by_tf.get(tf) for tf in ["4h", "12h"] if tf in ema200_by_tf]
+                if aggressive_emas:
+                    take_profit_aggressive = min(aggressive_emas)
+                else:
+                    take_profit_aggressive = entry_price + (atr * 4.0)  # Fallback
+                    
+            else:  # TREND_START
+                # TREND_START: Conservative = EMA200 on 4h/12h
+                conservative_emas = [ema200_by_tf.get(tf) for tf in ["4h", "12h"] if tf in ema200_by_tf]
+                if conservative_emas:
+                    take_profit_conservative = min(conservative_emas)
+                else:
+                    take_profit_conservative = entry_price + (atr * 3.0)  # Fallback
+                
+                # Aggressive = return to higher TF or extended move
+                if "12h" in ema200_by_tf:
+                    take_profit_aggressive = ema200_by_tf["12h"] * 1.005  # Above 12h EMA200
+                else:
+                    take_profit_aggressive = entry_price + (atr * 6.0)  # Fallback
+                    
         else:  # SHORT signal
             # SHORT signal entry logic
             distance_from_ema9 = ((close - ema_9) / ema_9 * 100) if ema_9 else 0
@@ -127,8 +200,47 @@ def calculate_optimal_entry(
                 entry_reason = "Normal entry zone"
             
             stop_loss = ema_20 * 1.002  # Above EMA20
-            take_profit_conservative = entry_price - (atr * 1.5)
-            take_profit_aggressive = entry_price - (atr * 3.0)
+            
+            # SHORT: Same EMA200 logic but inverted (prices go down)
+            if trade_type == "SCALP":
+                # SCALP: Conservative = return to EMA200 on 1m/5m/15m
+                conservative_emas = [ema200_by_tf.get(tf) for tf in ["1m", "5m", "15m"] if tf in ema200_by_tf]
+                if conservative_emas:
+                    take_profit_conservative = max(conservative_emas)  # Highest EMA200 level (for SHORT)
+                else:
+                    take_profit_conservative = entry_price - (atr * 1.5)
+                
+                # Aggressive = break above EMA200
+                if "30m" in ema200_by_tf:
+                    take_profit_aggressive = ema200_by_tf["30m"] * 1.005  # Just above 30m EMA200
+                else:
+                    take_profit_aggressive = entry_price - (atr * 3.0)
+                    
+            elif trade_type == "SWING":
+                conservative_emas = [ema200_by_tf.get(tf) for tf in ["30m", "1h"] if tf in ema200_by_tf]
+                if conservative_emas:
+                    take_profit_conservative = max(conservative_emas)
+                else:
+                    take_profit_conservative = entry_price - (atr * 2.0)
+                
+                aggressive_emas = [ema200_by_tf.get(tf) for tf in ["4h", "12h"] if tf in ema200_by_tf]
+                if aggressive_emas:
+                    take_profit_aggressive = max(aggressive_emas)
+                else:
+                    take_profit_aggressive = entry_price - (atr * 4.0)
+                    
+            else:  # TREND_START
+                conservative_emas = [ema200_by_tf.get(tf) for tf in ["4h", "12h"] if tf in ema200_by_tf]
+                if conservative_emas:
+                    take_profit_conservative = max(conservative_emas)
+                else:
+                    take_profit_conservative = entry_price - (atr * 3.0)
+                
+                if "12h" in ema200_by_tf:
+                    take_profit_aggressive = ema200_by_tf["12h"] * 0.995  # Below 12h EMA200
+                else:
+                    take_profit_aggressive = entry_price - (atr * 6.0)
+        
         
         return {
             "entry_recommendation": recommendation,
@@ -140,6 +252,8 @@ def calculate_optimal_entry(
             "risk_reward_ratio": round(
                 abs(entry_price - take_profit_aggressive) / abs(entry_price - stop_loss), 2
             ) if abs(entry_price - stop_loss) > 0 else 0,
+            "tp_method": "EMA200-based" if ema200_by_tf else "ATR-based",
+            "ema200_levels_used": ema200_by_tf if ema200_by_tf else None,
         }
     except Exception as e:
         import logging
@@ -152,6 +266,8 @@ def calculate_optimal_entry(
             "take_profit_conservative": 0.0,
             "take_profit_aggressive": 0.0,
             "risk_reward_ratio": 0.0,
+            "tp_method": "ERROR",
+            "ema200_levels_used": None,
         }
 
 
