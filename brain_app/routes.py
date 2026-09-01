@@ -14,6 +14,7 @@ from .features import (
     analyze_reversal_signals,
     calculate_reversal_weighted_decision,
 )
+from .decision_smoothing import smooth_decision
 
 logger = logging.getLogger(__name__)
 
@@ -509,6 +510,28 @@ def analyze():
         f"type={reversal_analysis['alignment_type']}, boost={reversal_decision['reversal_boost']:.1f}, "
         f"final_conf={confidence:.2%}"
     )
+    
+    # Step 5b: DECISION SMOOTHING - Prevent confidence whiplash (98% → 15% swings)
+    # Apply temporal averaging and hysteresis to reduce noise from consecutive candles
+    smoothing_result = smooth_decision(
+        symbol=payload["symbol"],
+        signal_type=payload["signal_type"],
+        raw_confidence=confidence,
+        raw_decision=decision,
+        current_alignment_score=tf_alignment["tf_alignment_score"],
+    )
+    
+    # Use smoothed decision and confidence
+    decision = smoothing_result["smoothed_decision"]
+    confidence = smoothing_result["smoothed_confidence"]
+    
+    if smoothing_result["applied_hysteresis"]:
+        logger.warning(
+            f"⚠️ HYSTERESIS PREVENTED FLIP: {payload['symbol']} {payload['signal_type']} | "
+            f"Tried to flip {smoothing_result['previous_decision']}→{smoothing_result['smoothed_decision']} "
+            f"but gap only {smoothing_result['confidence_gap']:.2%} (need 20%) | "
+            f"Keeping {decision}"
+        )
     
     # Step 6: Calculate optimal entry price and timing
     from brain_app.features import calculate_optimal_entry, classify_trade_type
