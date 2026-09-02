@@ -560,6 +560,25 @@ def analyze():
             f"Keeping {decision}"
         )
     
+    # Step 5c: 12H MOMENTUM BOOST - Small boost when going with strong 12H trend
+    # "Buy the dip" / "Go with the flow" logic: Strong 12H trend + aligned signal = confidence boost
+    from brain_app.features import calculate_12h_momentum_boost
+    
+    momentum_12h = calculate_12h_momentum_boost(
+        symbol=payload["symbol"],
+        signal_type=payload["signal_type"],
+        candle_store=current_app.candle_store
+    )
+    
+    if momentum_12h["confidence_boost"] > 0:
+        pre_momentum_confidence = confidence
+        confidence = min(0.99, confidence + momentum_12h["confidence_boost"])
+        logger.info(
+            f"🌪️ 12H MOMENTUM BOOST: {payload['symbol']} {payload['signal_type']} | "
+            f"{momentum_12h['boost_reason']} | "
+            f"Boosted {pre_momentum_confidence:.2%} → {confidence:.2%} (+{momentum_12h['confidence_boost']:.0%})"
+        )
+    
     # Step 6: Calculate optimal entry price and timing
     from brain_app.features import calculate_optimal_entry, classify_trade_type
     

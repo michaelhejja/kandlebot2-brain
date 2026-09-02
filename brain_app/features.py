@@ -56,6 +56,135 @@ def _get_multi_tf_ema200(symbol: str, candle_store) -> dict[str, float]:
     return ema200_by_tf
 
 
+def calculate_12h_momentum_boost(symbol: str, signal_type: str, candle_store) -> dict[str, Any]:
+    """Calculate confidence boost based on strong 12H trend momentum.
+    
+    "Buy the dip" and "go with the flow" opportunities: when 12H shows strong 
+    directional trend with strong momentum indicators, small setup anomalies 
+    on smaller timeframes become low-risk high-probability entries.
+    
+    Logic:
+    - ADX > 25: Trend exists
+    - ADX > 50: Strong trend (larger boost potential)
+    - PDI > MDI * 2: Strong upward momentum (for LONG signals)
+    - PDI > MDI * 3: Very strong upward momentum (bigger boost)
+    - MDI > PDI * 2: Strong downward momentum (for SHORT signals)
+    - MDI > PDI * 3: Very strong downward momentum (bigger boost)
+    
+    Returns dict with:
+        - has_12h_trend: bool (ADX > 25)
+        - momentum_direction: str (long/short/none)
+        - momentum_ratio: float (stronger ratio = more conviction)
+        - adx_strength: float (ADX value)
+        - confidence_boost: float (0.0-0.15, amount to add to confidence)
+        - boost_reason: str (explanation)
+    """
+    boost_data = {
+        "has_12h_trend": False,
+        "momentum_direction": "none",
+        "momentum_ratio": 1.0,
+        "adx_strength": 0.0,
+        "confidence_boost": 0.0,
+        "boost_reason": "No 12H trend"
+    }
+    
+    try:
+        if not candle_store:
+            return boost_data
+        
+        latest_12h = candle_store.get_latest_candle(symbol, "12h")
+        if not latest_12h or not latest_12h.get("indicators"):
+            return boost_data
+        
+        indicators = latest_12h["indicators"]
+        
+        # Extract ADX and directional indicators
+        adx = indicators.get("adx", 0.0)
+        pdi = indicators.get("pdi", 0.0)  # Positive Directional Index
+        mdi = indicators.get("mdi", 0.0)  # Negative Directional Index
+        
+        # ADX must be > 25 to have a trend
+        if adx <= 25.0:
+            return boost_data
+        
+        boost_data["has_12h_trend"] = True
+        boost_data["adx_strength"] = adx
+        
+        # Determine momentum direction and ratio
+        if pdi > mdi:
+            # Uptrend on 12H
+            momentum_ratio = pdi / mdi if mdi > 0 else pdi / 0.1  # Avoid div by zero
+            boost_data["momentum_direction"] = "long"
+            boost_data["momentum_ratio"] = momentum_ratio
+            
+            # Only apply boost if signal_type matches (LONG signal in uptrend)
+            if signal_type == "long":
+                # Calculate boost based on ratio and ADX strength
+                if momentum_ratio >= 3.0:
+                    # Very strong momentum (PDI > MDI * 3)
+                    if adx > 50:
+                        boost = 0.15  # Max boost: 15%
+                        reason = f"Very strong 12H uptrend (ADX={adx:.0f}, PDI/MDI={momentum_ratio:.1f}x)"
+                    else:
+                        boost = 0.10  # Medium boost: 10%
+                        reason = f"Very strong 12H uptrend (ADX={adx:.0f}, PDI/MDI={momentum_ratio:.1f}x)"
+                elif momentum_ratio >= 2.0:
+                    # Strong momentum (PDI > MDI * 2)
+                    if adx > 50:
+                        boost = 0.10  # Medium boost: 10%
+                        reason = f"Strong 12H uptrend (ADX={adx:.0f}, PDI/MDI={momentum_ratio:.1f}x)"
+                    else:
+                        boost = 0.06  # Small boost: 6%
+                        reason = f"Strong 12H uptrend (ADX={adx:.0f}, PDI/MDI={momentum_ratio:.1f}x)"
+                else:
+                    # Mild uptrend
+                    boost = 0.03  # Tiny boost: 3%
+                    reason = f"12H uptrend trend present (ADX={adx:.0f})"
+                
+                boost_data["confidence_boost"] = boost
+                boost_data["boost_reason"] = reason
+        
+        elif mdi > pdi:
+            # Downtrend on 12H
+            momentum_ratio = mdi / pdi if pdi > 0 else mdi / 0.1  # Avoid div by zero
+            boost_data["momentum_direction"] = "short"
+            boost_data["momentum_ratio"] = momentum_ratio
+            
+            # Only apply boost if signal_type matches (SHORT signal in downtrend)
+            if signal_type == "short":
+                # Calculate boost based on ratio and ADX strength
+                if momentum_ratio >= 3.0:
+                    # Very strong momentum (MDI > PDI * 3)
+                    if adx > 50:
+                        boost = 0.15  # Max boost: 15%
+                        reason = f"Very strong 12H downtrend (ADX={adx:.0f}, MDI/PDI={momentum_ratio:.1f}x)"
+                    else:
+                        boost = 0.10  # Medium boost: 10%
+                        reason = f"Very strong 12H downtrend (ADX={adx:.0f}, MDI/PDI={momentum_ratio:.1f}x)"
+                elif momentum_ratio >= 2.0:
+                    # Strong momentum (MDI > PDI * 2)
+                    if adx > 50:
+                        boost = 0.10  # Medium boost: 10%
+                        reason = f"Strong 12H downtrend (ADX={adx:.0f}, MDI/PDI={momentum_ratio:.1f}x)"
+                    else:
+                        boost = 0.06  # Small boost: 6%
+                        reason = f"Strong 12H downtrend (ADX={adx:.0f}, MDI/PDI={momentum_ratio:.1f}x)"
+                else:
+                    # Mild downtrend
+                    boost = 0.03  # Tiny boost: 3%
+                    reason = f"12H downtrend trend present (ADX={adx:.0f})"
+                
+                boost_data["confidence_boost"] = boost
+                boost_data["boost_reason"] = reason
+        
+        return boost_data
+    
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug(f"Error calculating 12H momentum boost: {e}")
+        return boost_data
+
+
 def calculate_optimal_entry(
     payload: dict,
     trade_type: str = "SCALP",
