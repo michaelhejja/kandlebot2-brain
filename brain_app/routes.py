@@ -579,6 +579,26 @@ def analyze():
             f"Boosted {pre_momentum_confidence:.2%} → {confidence:.2%} (+{momentum_12h['confidence_boost']:.0%})"
         )
     
+    # Step 5d: RISING FLOOR / FALLING CEILING - Session momentum confirmation
+    # "Buy the dip" refinement: each cluster of analysis events that shows
+    # progression (higher lows for LONG, lower highs for SHORT) slightly boosts confidence
+    from brain_app.features import get_rising_floor_boost
+    
+    rf_result = get_rising_floor_boost(
+        symbol=payload["symbol"],
+        close=payload["close"],
+        direction=payload["signal_type"]
+    )
+    
+    if rf_result["boost"] > 0:
+        pre_rf_confidence = confidence
+        confidence = min(0.99, confidence + rf_result["boost"] / 100)  # Convert boost to decimal
+        logger.info(
+            f"📈 RISING FLOOR: {payload['symbol']} {payload['signal_type']} | "
+            f"{rf_result['reason']} | "
+            f"Boosted {pre_rf_confidence:.2%} → {confidence:.2%} (+{rf_result['boost']:.0%})"
+        )
+    
     # Step 6: Calculate optimal entry price and timing
     from brain_app.features import calculate_optimal_entry, classify_trade_type
     

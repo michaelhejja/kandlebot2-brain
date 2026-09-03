@@ -11,6 +11,7 @@ and make sure your training CSV has the same column names.
 from __future__ import annotations
 
 from typing import Any
+import time
 
 # Canonical, ordered list of indicator features the model expects.
 # MUST match exactly what the trained model was trained on (see train_model.py)
@@ -28,6 +29,146 @@ FEATURE_COLUMNS = [
     "mfi_trend",        # -100 to +100: money flow momentum
     "signal",           # 1.0 for BUY, 0.0 for SELL
 ]
+
+
+class RisingFloorDetector:
+    """Detects rising floor (LONG) or falling ceiling (SHORT) progression.
+    
+    Buffers rapid successive analyze events into "clusters" (ignores noise within 60s),
+    then tracks if subsequent clusters show progression in the right direction.
+    Provides confidence boost for each successive cluster in the trend direction.
+    
+    In-memory only; resets on Brain restart.
+    """
+    
+    def __init__(self, cluster_window_seconds: int = 60, max_clusters_per_direction: int = 10):
+        self.cluster_window = cluster_window_seconds
+        self.max_clusters = max_clusters_per_direction
+        # Structure: {symbol: {'LONG': {...}, 'SHORT': {...}}}
+        self.data: dict[str, dict[str, dict]] = {}
+    
+    def get_boost(self, symbol: str, close: float, direction: str) -> dict[str, Any]:
+        """
+        Process a new analyze event and return rising floor boost.
+        
+        Args:
+            symbol: Trading pair (e.g., 'ETH')
+            close: Current close price
+            direction: 'LONG' or 'SHORT'
+            
+        Returns:
+            {
+                'boost': 0-4 (confidence boost percentage),
+                'reason': str explaining the boost,
+                'cluster_count': int (how many finalized clusters),
+                'progression': bool (is this cluster showing progression?)
+            }
+        """
+        current_time = time.time()
+        
+        # Initialize symbol tracking
+        if symbol not in self.data:
+            self.data[symbol] = {
+                'LONG': {'finalized_clusters': [], 'current_cluster': None},
+                'SHORT': {'finalized_clusters': [], 'current_cluster': None}
+            }
+        
+        dir_data = self.data[symbol][direction]
+        
+        # Initialize or check if we need to finalize current cluster
+        if dir_data['current_cluster'] is None:
+            dir_data['current_cluster'] = {
+                'start_time': current_time,
+                'closes': [close]
+            }
+            return {'boost': 0, 'reason': 'First cluster (baseline)', 'cluster_count': 0, 'progression': False}
+        
+        time_since_start = current_time - dir_data['current_cluster']['start_time']
+        
+        if time_since_start > self.cluster_window:
+            # Finalize current cluster
+            avg_close = sum(dir_data['current_cluster']['closes']) / len(dir_data['current_cluster']['closes'])
+            dir_data['finalized_clusters'].append(avg_close)
+            
+            # Trim history to prevent unbounded growth
+            if len(dir_data['finalized_clusters']) > self.max_clusters:
+                dir_data['finalized_clusters'] = dir_data['finalized_clusters'][-self.max_clusters:]
+            
+            # Start new cluster with current price
+            dir_data['current_cluster'] = {
+                'start_time': current_time,
+                'closes': [close]
+            }
+            
+            # Calculate boost based on progression
+            boost_data = self._calculate_progression_boost(dir_data['finalized_clusters'], direction)
+            boost_data['cluster_count'] = len(dir_data['finalized_clusters'])
+            return boost_data
+        else:
+            # Still within cluster window - add to current cluster buffer
+            dir_data['current_cluster']['closes'].append(close)
+            return {'boost': 0, 'reason': 'In cluster (buffering noise)', 'cluster_count': len(dir_data['finalized_clusters']), 'progression': False}
+    
+    def _calculate_progression_boost(self, finalized_clusters: list[float], direction: str) -> dict[str, Any]:
+        """
+        Detect rising floor (LONG: prices climbing higher between clusters)
+        or falling ceiling (SHORT: prices dropping lower between clusters).
+        
+        Returns +1% for each successive cluster that shows progression.
+        Stops counting when progression breaks.
+        """
+        if len(finalized_clusters) < 2:
+            return {'boost': 0, 'reason': 'Need 2+ clusters to detect progression', 'progression': False}
+        
+        boost = 0
+        progression_count = 0
+        
+        # Walk backward from most recent cluster, counting consecutive progression
+        for i in range(len(finalized_clusters) - 1, 0, -1):
+            current = finalized_clusters[i]
+            previous = finalized_clusters[i - 1]
+            
+            if direction == 'LONG':
+                # Rising floor: current price > previous price
+                if current > previous:
+                    boost += 1
+                    progression_count += 1
+                else:
+                    break  # Progression stopped
+            elif direction == 'SHORT':
+                # Falling ceiling: current price < previous price
+                if current < previous:
+                    boost += 1
+                    progression_count += 1
+                else:
+                    break  # Progression stopped
+        
+        boost = min(boost, 4)  # Cap at 4%
+        
+        if progression_count == 0:
+            reason = f"No {direction.lower()} progression (price moved wrong direction)"
+        elif progression_count == 1:
+            reason = f"{progression_count} successive {direction.lower()} cluster (+1% boost)"
+        else:
+            reason = f"{progression_count} consecutive {direction.lower()} clusters (+{progression_count}% boost, momentum building!)"
+        
+        return {
+            'boost': boost,
+            'reason': reason,
+            'progression': progression_count > 0
+        }
+
+
+# Global detector instance - persists during Brain session
+_rising_floor_detector = RisingFloorDetector(cluster_window_seconds=300, max_clusters_per_direction=10)
+
+
+def get_rising_floor_boost(symbol: str, close: float, direction: str) -> dict[str, Any]:
+    """
+    Get confidence boost from rising floor/falling ceiling detection.
+    Call this in Step 5d of the analyze endpoint.
+    """
+    return _rising_floor_detector.get_boost(symbol, close, direction)
 
 
 class PayloadValidationError(ValueError):
@@ -257,7 +398,7 @@ def calculate_optimal_entry(
                 entry_price = close
                 entry_reason = "Normal entry zone"
             
-            stop_loss = ema_20 * 0.998  # Below EMA20
+            stop_loss = entry_price - (atr * 1.5)  # 1.5x ATR below entry for LONG
             
             # Calculate take profits based on trade type using EMA200 levels
             if trade_type == "SCALP":
@@ -328,7 +469,7 @@ def calculate_optimal_entry(
                 entry_price = close
                 entry_reason = "Normal entry zone"
             
-            stop_loss = ema_20 * 1.002  # Above EMA20
+            stop_loss = entry_price + (atr * 1.5)  # 1.5x ATR above entry for SHORT
             
             # SHORT: Same EMA200 logic but inverted (prices go down)
             if trade_type == "SCALP":
