@@ -564,40 +564,48 @@ def analyze():
     # "Buy the dip" / "Go with the flow" logic: Strong 12H trend + aligned signal = confidence boost
     from brain_app.features import calculate_12h_momentum_boost
     
-    momentum_12h = calculate_12h_momentum_boost(
-        symbol=payload["symbol"],
-        signal_type=payload["signal_type"],
-        candle_store=current_app.candle_store
-    )
-    
-    if momentum_12h["confidence_boost"] > 0:
-        pre_momentum_confidence = confidence
-        confidence = min(0.99, confidence + momentum_12h["confidence_boost"])
-        logger.info(
-            f"🌪️ 12H MOMENTUM BOOST: {payload['symbol']} {payload['signal_type']} | "
-            f"{momentum_12h['boost_reason']} | "
-            f"Boosted {pre_momentum_confidence:.2%} → {confidence:.2%} (+{momentum_12h['confidence_boost']:.0%})"
+    try:
+        momentum_12h = calculate_12h_momentum_boost(
+            symbol=payload["symbol"],
+            signal_type=payload["signal_type"],
+            candle_store=current_app.candle_store
         )
+        
+        if momentum_12h["confidence_boost"] > 0:
+            pre_momentum_confidence = confidence
+            confidence = min(0.99, confidence + momentum_12h["confidence_boost"])
+            logger.info(
+                f"🌪️ 12H MOMENTUM BOOST: {payload['symbol']} {payload['signal_type']} | "
+                f"{momentum_12h['boost_reason']} | "
+                f"Boosted {pre_momentum_confidence:.2%} → {confidence:.2%} (+{momentum_12h['confidence_boost']:.0%})"
+            )
+    except Exception as e:
+        logger.error(f"❌ ERROR in 12H momentum boost: {str(e)}", exc_info=True)
+        # Continue without boost on error
     
     # Step 5d: RISING FLOOR / FALLING CEILING - Session momentum confirmation
     # "Buy the dip" refinement: each cluster of analysis events that shows
     # progression (higher lows for LONG, lower highs for SHORT) slightly boosts confidence
     from brain_app.features import get_rising_floor_boost
     
-    rf_result = get_rising_floor_boost(
-        symbol=payload["symbol"],
-        close=payload["close"],
-        direction=payload["signal_type"]
-    )
-    
-    if rf_result["boost"] > 0:
-        pre_rf_confidence = confidence
-        confidence = min(0.99, confidence + rf_result["boost"] / 100)  # Convert boost to decimal
-        logger.info(
-            f"📈 RISING FLOOR: {payload['symbol']} {payload['signal_type']} | "
-            f"{rf_result['reason']} | "
-            f"Boosted {pre_rf_confidence:.2%} → {confidence:.2%} (+{rf_result['boost']:.0%})"
+    try:
+        rf_result = get_rising_floor_boost(
+            symbol=payload["symbol"],
+            close=payload["close"],
+            direction=payload["signal_type"]
         )
+        
+        if rf_result["boost"] > 0:
+            pre_rf_confidence = confidence
+            confidence = min(0.99, confidence + rf_result["boost"] / 100)  # Convert boost to decimal
+            logger.info(
+                f"📈 RISING FLOOR: {payload['symbol']} {payload['signal_type']} | "
+                f"{rf_result['reason']} | "
+                f"Boosted {pre_rf_confidence:.2%} → {confidence:.2%} (+{rf_result['boost']:.0%})"
+            )
+    except Exception as e:
+        logger.error(f"❌ ERROR in rising floor detection: {str(e)}", exc_info=True)
+        # Continue without boost on error
     
     # Step 6: Calculate optimal entry price and timing
     from brain_app.features import calculate_optimal_entry, classify_trade_type
@@ -633,11 +641,24 @@ def analyze():
         )
     
     # Then calculate entry with EMA200-based TPs based on trade type
-    entry_analysis = calculate_optimal_entry(
-        payload,
-        trade_type=trade_classification.get("trade_type", "SCALP"),
-        candle_store=current_app.candle_store
-    )
+    try:
+        entry_analysis = calculate_optimal_entry(
+            payload,
+            trade_type=trade_classification.get("trade_type", "SCALP"),
+            candle_store=current_app.candle_store
+        )
+    except Exception as e:
+        logger.error(f"❌ ERROR calculating optimal entry: {str(e)}", exc_info=True)
+        # Fallback entry analysis with safe defaults
+        entry_analysis = {
+            "entry_recommendation": "ENTER_NOW",
+            "entry_price": payload.get("close", 0),
+            "entry_reason": "Market price (calculation error, using fallback)",
+            "stop_loss": payload.get("close", 0) - (payload.get("atr", 0.001) * 1.5),
+            "take_profit_conservative": payload.get("close", 0) + (payload.get("atr", 0.001) * 3),
+            "take_profit_aggressive": payload.get("close", 0) + (payload.get("atr", 0.001) * 6),
+            "risk_reward_ratio": 1.0
+        }
     
     return jsonify(
         symbol=payload["symbol"],

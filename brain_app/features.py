@@ -117,46 +117,55 @@ class RisingFloorDetector:
         Returns +1% for each successive cluster that shows progression.
         Stops counting when progression breaks.
         """
-        if len(finalized_clusters) < 2:
+        if not finalized_clusters or len(finalized_clusters) < 2:
             return {'boost': 0, 'reason': 'Need 2+ clusters to detect progression', 'progression': False}
         
-        boost = 0
-        progression_count = 0
-        
-        # Walk backward from most recent cluster, counting consecutive progression
-        for i in range(len(finalized_clusters) - 1, 0, -1):
-            current = finalized_clusters[i]
-            previous = finalized_clusters[i - 1]
+        try:
+            boost = 0
+            progression_count = 0
             
-            if direction == 'LONG':
-                # Rising floor: current price > previous price
-                if current > previous:
-                    boost += 1
-                    progression_count += 1
-                else:
-                    break  # Progression stopped
-            elif direction == 'SHORT':
-                # Falling ceiling: current price < previous price
-                if current < previous:
-                    boost += 1
-                    progression_count += 1
-                else:
-                    break  # Progression stopped
-        
-        boost = min(boost, 4)  # Cap at 4%
-        
-        if progression_count == 0:
-            reason = f"No {direction.lower()} progression (price moved wrong direction)"
-        elif progression_count == 1:
-            reason = f"{progression_count} successive {direction.lower()} cluster (+1% boost)"
-        else:
-            reason = f"{progression_count} consecutive {direction.lower()} clusters (+{progression_count}% boost, momentum building!)"
-        
-        return {
-            'boost': boost,
-            'reason': reason,
-            'progression': progression_count > 0
-        }
+            # Walk backward from most recent cluster, counting consecutive progression
+            for i in range(len(finalized_clusters) - 1, 0, -1):
+                current = finalized_clusters[i]
+                previous = finalized_clusters[i - 1]
+                
+                # Defensive: ensure values are numbers
+                if not isinstance(current, (int, float)) or not isinstance(previous, (int, float)):
+                    break
+                
+                if direction == 'LONG':
+                    # Rising floor: current price > previous price
+                    if current > previous:
+                        boost += 1
+                        progression_count += 1
+                    else:
+                        break  # Progression stopped
+                elif direction == 'SHORT':
+                    # Falling ceiling: current price < previous price
+                    if current < previous:
+                        boost += 1
+                        progression_count += 1
+                    else:
+                        break  # Progression stopped
+            
+            boost = min(boost, 4)  # Cap at 4%
+            
+            if progression_count == 0:
+                reason = f"No {direction.lower()} progression (price moved wrong direction)"
+            elif progression_count == 1:
+                reason = f"{progression_count} successive {direction.lower()} cluster (+1% boost)"
+            else:
+                reason = f"{progression_count} consecutive {direction.lower()} clusters (+{progression_count}% boost, momentum building!)"
+            
+            return {
+                'boost': boost,
+                'reason': reason,
+                'progression': progression_count > 0
+            }
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error in progression boost calculation: {e}")
+            return {'boost': 0, 'reason': f'Calculation error (safe fallback)', 'progression': False}
 
 
 # Global detector instance - persists during Brain session
@@ -167,8 +176,23 @@ def get_rising_floor_boost(symbol: str, close: float, direction: str) -> dict[st
     """
     Get confidence boost from rising floor/falling ceiling detection.
     Call this in Step 5d of the analyze endpoint.
+    Includes error handling to ensure function never crashes.
     """
-    return _rising_floor_detector.get_boost(symbol, close, direction)
+    try:
+        if not symbol or close is None or not direction:
+            return {'boost': 0, 'reason': 'Invalid parameters', 'progression': False}
+        
+        result = _rising_floor_detector.get_boost(symbol, close, direction)
+        
+        # Validate result structure
+        if not isinstance(result, dict) or 'boost' not in result:
+            return {'boost': 0, 'reason': 'Invalid result structure', 'progression': False}
+        
+        return result
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error in get_rising_floor_boost: {e}", exc_info=True)
+        return {'boost': 0, 'reason': 'Error in rising floor detection (safe fallback)', 'progression': False}
 
 
 class PayloadValidationError(ValueError):
