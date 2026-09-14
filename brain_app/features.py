@@ -221,6 +221,139 @@ def _get_multi_tf_ema200(symbol: str, candle_store) -> dict[str, float]:
     return ema200_by_tf
 
 
+# Weekly pivots only change once a new ISO week begins - cache per (symbol, week_start)
+_WEEKLY_PIVOT_CACHE: dict[tuple[str, str], dict] = {}
+
+
+def calculate_weekly_pivots(symbol: str, candle_store) -> dict[str, Any]:
+    """Calculate standard weekly pivot points from the prior completed calendar week.
+
+    Uses ISO calendar weeks (Monday 00:00 UTC start). PP/R1-R3/S1-S3 are fixed
+    for the entire current week regardless of timeframe, so results are cached
+    per (symbol, week_start) and only recomputed once a new week begins.
+
+    Returns dict with pp, r1, r2, r3, s1, s2, s3, week_start, and the prior
+    week's high/low/close. Returns {} if insufficient candle history exists yet.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if not candle_store:
+        return {}
+
+    try:
+        now = datetime.now(timezone.utc)
+        current_week_start = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        prev_week_start = current_week_start - timedelta(days=7)
+
+        cache_key = (symbol, current_week_start.date().isoformat())
+        if cache_key in _WEEKLY_PIVOT_CACHE:
+            return _WEEKLY_PIVOT_CACHE[cache_key]
+
+        # Reconstruct the prior week's H/L/C from stored candles (prefer finer TF, fall back to coarser)
+        candles: list[dict] = []
+        for tf in ["1h", "4h", "12h"]:
+            fetched = candle_store.db.get_candles(symbol, tf, since=prev_week_start, limit=200)
+            in_prior_week = []
+            for c in fetched:
+                ts = c["timestamp"]
+                ts_dt = ts if isinstance(ts, datetime) else datetime.fromisoformat(ts)
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+                if ts_dt < current_week_start:
+                    in_prior_week.append(c)
+            if len(in_prior_week) >= 4:
+                candles = in_prior_week
+                break
+
+        if not candles:
+            return {}
+
+        high = max(float(c["high"]) for c in candles)
+        low = min(float(c["low"]) for c in candles)
+        close = float(candles[-1]["close"])
+
+        pp = (high + low + close) / 3
+        r1 = (2 * pp) - low
+        s1 = (2 * pp) - high
+        r2 = pp + (high - low)
+        s2 = pp - (high - low)
+        r3 = high + 2 * (pp - low)
+        s3 = low - 2 * (high - pp)
+
+        pivots = {
+            "pp": round(pp, 2),
+            "r1": round(r1, 2),
+            "r2": round(r2, 2),
+            "r3": round(r3, 2),
+            "s1": round(s1, 2),
+            "s2": round(s2, 2),
+            "s3": round(s3, 2),
+            "week_start": current_week_start.date().isoformat(),
+            "prior_week_high": round(high, 2),
+            "prior_week_low": round(low, 2),
+            "prior_week_close": round(close, 2),
+        }
+        _WEEKLY_PIVOT_CACHE[cache_key] = pivots
+        return pivots
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error calculating weekly pivots: {e}", exc_info=True)
+        return {}
+
+
+def _pivot_limit_entry(close: float, signal_type: str, pivots: dict) -> dict | None:
+    """Check if price is approaching a weekly pivot level in the trade's favor.
+
+    If so, suggests a LIMIT entry placed at that level (a likely reaction zone)
+    instead of chasing the current market price. Returns None if no pivots are
+    available or price isn't within the "approaching" band of any level.
+    """
+    if not pivots or "pp" not in pivots:
+        return None
+
+    NEAR_MIN_PCT = 0.15  # already essentially at the level - just enter now
+    NEAR_MAX_PCT = 2.0   # too far away for the level to be actionable yet
+
+    pp = pivots["pp"]
+
+    if signal_type == "short":
+        # Resistance levels above price are good LIMIT SELL zones
+        candidates = [("R1", pivots.get("r1")), ("R2", pivots.get("r2")), ("R3", pivots.get("r3"))]
+        if close < pp:
+            candidates.insert(0, ("PP", pp))
+        above = [(name, lvl) for name, lvl in candidates if lvl is not None and lvl > close]
+        if not above:
+            return None
+        name, level = min(above, key=lambda pair: pair[1])
+        distance_pct = (level - close) / close * 100
+        if NEAR_MIN_PCT <= distance_pct <= NEAR_MAX_PCT:
+            return {
+                "entry_recommendation": "LIMIT_AT_PIVOT",
+                "entry_price": level,
+                "entry_reason": f"Approaching weekly {name} (${level:.2f}) - place LIMIT SHORT there instead of chasing market",
+            }
+    else:
+        # Support levels below price are good LIMIT BUY zones
+        candidates = [("S1", pivots.get("s1")), ("S2", pivots.get("s2")), ("S3", pivots.get("s3"))]
+        if close > pp:
+            candidates.insert(0, ("PP", pp))
+        below = [(name, lvl) for name, lvl in candidates if lvl is not None and lvl < close]
+        if not below:
+            return None
+        name, level = max(below, key=lambda pair: pair[1])
+        distance_pct = (close - level) / close * 100
+        if NEAR_MIN_PCT <= distance_pct <= NEAR_MAX_PCT:
+            return {
+                "entry_recommendation": "LIMIT_AT_PIVOT",
+                "entry_price": level,
+                "entry_reason": f"Approaching weekly {name} (${level:.2f}) - place LIMIT LONG there instead of chasing market",
+            }
+
+    return None
+
+
 def calculate_12h_momentum_boost(symbol: str, signal_type: str, candle_store) -> dict[str, Any]:
     """Calculate confidence boost based on strong 12H trend momentum.
     
@@ -354,6 +487,7 @@ def calculate_optimal_entry(
     payload: dict,
     trade_type: str = "SCALP",
     candle_store = None,
+    weekly_pivots: dict | None = None,
 ) -> dict[str, Any]:
     """Calculate optimal entry price and EMA200-based take profit targets.
     
@@ -363,10 +497,15 @@ def calculate_optimal_entry(
     - SWING: Conservative = EMA200 on 30m/1h, Aggressive = EMA200 on 4h/12h
     - TREND_START: Conservative = EMA200 on 4h/12h, Aggressive = higher TF
     
+    If weekly_pivots is provided and price is approaching a pivot level in the
+    trade's favor, recommends a LIMIT_AT_PIVOT entry at that level instead of
+    chasing the market, and uses pivot levels to tighten the conservative TP.
+    
     Args:
         payload: Full payload dict with symbol, signal_type, indicators
         trade_type: Type of trade (SCALP, SWING, TREND_START) for TP calculation
         candle_store: Database access to fetch multi-timeframe EMA200 data
+        weekly_pivots: Optional weekly pivot levels from calculate_weekly_pivots()
         
     Returns:
         Dict with entry_recommendation, entry_price, stop_loss, take_profit targets
@@ -395,13 +534,20 @@ def calculate_optimal_entry(
         if candle_store:
             ema200_by_tf = _get_multi_tf_ema200(symbol, candle_store)
         
+        # Check if price is approaching a weekly pivot level in the trade's favor
+        pivot_override = _pivot_limit_entry(close, signal_type, weekly_pivots) if weekly_pivots else None
+        
         # Calculate take profit targets based on trade type and EMA200 levels
         if signal_type == "long":
             # LONG signal entry logic
             distance_from_ema9 = ((ema_9 - close) / ema_9 * 100) if ema_9 else 0
             
             # Entry recommendation
-            if distance_from_ema9 > 0.5:  # Below EMA9 = good entry
+            if pivot_override:
+                recommendation = pivot_override["entry_recommendation"]
+                entry_price = pivot_override["entry_price"]
+                entry_reason = pivot_override["entry_reason"]
+            elif distance_from_ema9 > 0.5:  # Below EMA9 = good entry
                 recommendation = "ENTER_NOW"
                 entry_price = close
                 entry_reason = "Price below EMA9 - strong entry zone"
@@ -472,7 +618,11 @@ def calculate_optimal_entry(
             # SHORT signal entry logic
             distance_from_ema9 = ((close - ema_9) / ema_9 * 100) if ema_9 else 0
             
-            if distance_from_ema9 > 0.5:  # Above EMA9 = good SHORT entry
+            if pivot_override:
+                recommendation = pivot_override["entry_recommendation"]
+                entry_price = pivot_override["entry_price"]
+                entry_reason = pivot_override["entry_reason"]
+            elif distance_from_ema9 > 0.5:  # Above EMA9 = good SHORT entry
                 recommendation = "ENTER_NOW"
                 entry_price = close
                 entry_reason = "Price above EMA9 - strong SHORT entry"
@@ -535,6 +685,22 @@ def calculate_optimal_entry(
                 else:
                     take_profit_aggressive = entry_price - (atr * 6.0)
         
+        # Tighten conservative TP using weekly pivots if a closer reaction level exists
+        if weekly_pivots:
+            if signal_type == "long":
+                resistances = [weekly_pivots.get(k) for k in ("r1", "r2", "r3") if weekly_pivots.get(k)]
+                if weekly_pivots.get("pp", 0) > entry_price:
+                    resistances.append(weekly_pivots["pp"])
+                above = [lvl for lvl in resistances if lvl > entry_price]
+                if above:
+                    take_profit_conservative = min(take_profit_conservative, min(above))
+            else:
+                supports = [weekly_pivots.get(k) for k in ("s1", "s2", "s3") if weekly_pivots.get(k)]
+                if weekly_pivots.get("pp", 0) < entry_price:
+                    supports.append(weekly_pivots["pp"])
+                below = [lvl for lvl in supports if lvl < entry_price]
+                if below:
+                    take_profit_conservative = max(take_profit_conservative, max(below))
         
         return {
             "entry_recommendation": recommendation,
@@ -548,6 +714,7 @@ def calculate_optimal_entry(
             ) if abs(entry_price - stop_loss) > 0 else 0,
             "tp_method": "EMA200-based" if ema200_by_tf else "ATR-based",
             "ema200_levels_used": ema200_by_tf if ema200_by_tf else None,
+            "weekly_pivots": weekly_pivots if weekly_pivots else None,
         }
     except Exception as e:
         import logging

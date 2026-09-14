@@ -608,10 +608,17 @@ def analyze():
         # Continue without boost on error
     
     # Step 6: Calculate optimal entry price and timing
-    from brain_app.features import calculate_optimal_entry, classify_trade_type
+    from brain_app.features import calculate_optimal_entry, classify_trade_type, calculate_weekly_pivots
     
     # First classify trade type to know which TP strategy to use
     trade_classification = classify_trade_type(payload, tf_alignment, confluence_level=confluence_level)
+    
+    # Weekly pivots (PP/R1-R3/S1-S3) - fixed for the whole ISO week, same across all timeframes
+    try:
+        weekly_pivots = calculate_weekly_pivots(payload["symbol"], current_app.candle_store)
+    except Exception as e:
+        logger.error(f"❌ ERROR calculating weekly pivots: {str(e)}", exc_info=True)
+        weekly_pivots = {}
     
     # Step 6a: HUNTING MODE - Check if we're in an inflection zone after TREND_START
     # If this is a TREND_START signal, record it to activate hunting mode for follow-ups
@@ -645,7 +652,8 @@ def analyze():
         entry_analysis = calculate_optimal_entry(
             payload,
             trade_type=trade_classification.get("trade_type", "SCALP"),
-            candle_store=current_app.candle_store
+            candle_store=current_app.candle_store,
+            weekly_pivots=weekly_pivots
         )
     except Exception as e:
         logger.error(f"❌ ERROR calculating optimal entry: {str(e)}", exc_info=True)
