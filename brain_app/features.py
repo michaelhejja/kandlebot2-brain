@@ -621,7 +621,9 @@ def classify_trade_type(
         
         # Classify based on characteristics
         # Priority 1: EXTREME reversals (scalps) - high probability, quick
-        if is_extreme_rsi and is_strong_macd and tf_score >= 3:
+        # NOTE: tf_score == 3 only (not >=) so perfect 4/4 alignment always falls through
+        # to Priority 2, which has its own SWING/TREND_START subdivision for that case.
+        if is_extreme_rsi and is_strong_macd and tf_score == 3:
             # SCALP: Extreme conditions + high TF confirmation = quick reversal
             trade_type = "SCALP"
             if rsi_extremity > 38:
