@@ -121,8 +121,12 @@ class Database:
         Yields:
             sqlite3.Connection with row factory set to Column.
         """
-        conn = sqlite3.connect(str(self.db_path))
+        # timeout: how long to wait on a locked DB before raising, instead of failing immediately
+        conn = sqlite3.connect(str(self.db_path), timeout=15.0)
         conn.row_factory = sqlite3.Row
+        # WAL allows readers and writers to proceed concurrently instead of blocking each other
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=15000")
         try:
             yield conn
         finally:
