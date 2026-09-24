@@ -548,21 +548,39 @@ def calculate_optimal_entry(
                 entry_price = pivot_override["entry_price"]
                 entry_reason = pivot_override["entry_reason"]
             elif distance_from_ema9 > 0.5:  # Below EMA9 = good entry
-                recommendation = "ENTER_NOW"
-                entry_price = close
-                entry_reason = "Price below EMA9 - strong entry zone"
+                # For SWING trades, prefer waiting for pullback; SCALP/TREND_START can enter immediately
+                if trade_type == "SWING":
+                    recommendation = "WAIT_FOR_DIP"
+                    entry_price = ema_9 * 0.998  # Target near EMA9
+                    entry_reason = "Wait for pullback to EMA9 - better risk/reward for swing hold"
+                else:
+                    recommendation = "ENTER_NOW"
+                    entry_price = close
+                    entry_reason = "Price below EMA9 - strong entry zone"
             elif 30 <= rsi <= 50:  # RSI in good zone for long
-                recommendation = "ENTER_NOW"
-                entry_price = close
-                entry_reason = "RSI optimal for long entry"
+                # For SWING trades, be more conservative
+                if trade_type == "SWING":
+                    recommendation = "WAIT_FOR_DIP" if rsi > 60 else "ENTER_NOW"
+                    entry_price = ema_9 * 0.998 if rsi > 60 else close
+                    entry_reason = "Optimal RSI zone, wait for slight pullback" if rsi > 60 else "RSI optimal for long entry"
+                else:
+                    recommendation = "ENTER_NOW"
+                    entry_price = close
+                    entry_reason = "RSI optimal for long entry"
             elif rsi > 65:  # Overbought
                 recommendation = "WAIT_FOR_DIP"
                 entry_price = ema_9 * 0.995  # Pullback target
                 entry_reason = "Price overbought, wait for pullback to EMA9"
             elif rsi < 30:  # Oversold
-                recommendation = "ENTER_NOW"
-                entry_price = close
-                entry_reason = "Oversold conditions - strong bounce potential"
+                # SWING: Wait for bounce confirmation; SCALP: Enter immediately
+                if trade_type == "SWING":
+                    recommendation = "WAIT_FOR_DIP"
+                    entry_price = ema_9 * 0.998
+                    entry_reason = "Oversold bounce expected - wait for confirmation on pullback"
+                else:
+                    recommendation = "ENTER_NOW"
+                    entry_price = close
+                    entry_reason = "Oversold conditions - strong bounce potential"
             else:
                 recommendation = "ENTER_NOW"
                 entry_price = close
@@ -623,21 +641,39 @@ def calculate_optimal_entry(
                 entry_price = pivot_override["entry_price"]
                 entry_reason = pivot_override["entry_reason"]
             elif distance_from_ema9 > 0.5:  # Above EMA9 = good SHORT entry
-                recommendation = "ENTER_NOW"
-                entry_price = close
-                entry_reason = "Price above EMA9 - strong SHORT entry"
+                # For SWING trades, prefer waiting for pullback; SCALP/TREND_START can enter immediately
+                if trade_type == "SWING":
+                    recommendation = "WAIT_FOR_BOUNCE"
+                    entry_price = ema_9 * 1.002  # Target near EMA9
+                    entry_reason = "Wait for bounce to EMA9 - better risk/reward for swing hold"
+                else:
+                    recommendation = "ENTER_NOW"
+                    entry_price = close
+                    entry_reason = "Price above EMA9 - strong SHORT entry"
             elif 50 <= rsi <= 70:  # RSI good for short
-                recommendation = "ENTER_NOW"
-                entry_price = close
-                entry_reason = "RSI optimal for SHORT entry"
+                # For SWING trades, be more conservative
+                if trade_type == "SWING":
+                    recommendation = "WAIT_FOR_BOUNCE" if rsi < 40 else "ENTER_NOW"
+                    entry_price = ema_9 * 1.002 if rsi < 40 else close
+                    entry_reason = "Optimal RSI zone, wait for slight bounce" if rsi < 40 else "RSI optimal for SHORT entry"
+                else:
+                    recommendation = "ENTER_NOW"
+                    entry_price = close
+                    entry_reason = "RSI optimal for SHORT entry"
             elif rsi < 35:  # Oversold
                 recommendation = "WAIT_FOR_BOUNCE"
                 entry_price = ema_9 * 1.005  # Bounce target
                 entry_reason = "Oversold, wait for bounce to EMA9"
             elif rsi > 70:  # Overbought
-                recommendation = "ENTER_NOW"
-                entry_price = close
-                entry_reason = "Overbought conditions - strong reversal"
+                # SWING: Wait for pullback confirmation; SCALP: Enter immediately
+                if trade_type == "SWING":
+                    recommendation = "WAIT_FOR_BOUNCE"
+                    entry_price = ema_9 * 1.002
+                    entry_reason = "Overbought pullback expected - wait for confirmation on bounce"
+                else:
+                    recommendation = "ENTER_NOW"
+                    entry_price = close
+                    entry_reason = "Overbought conditions - strong reversal"
             else:
                 recommendation = "ENTER_NOW"
                 entry_price = close
@@ -782,20 +818,20 @@ def classify_trade_type(
             macro_trend_strength = 0
         
         # Decision logic
-        is_high_momentum = rsi_extremity > 20  # Strong RSI signal (20+ from neutral)
-        is_strong_macd = abs(macd_momentum) > 1.5  # High threshold for strong
-        is_extreme_rsi = rsi_extremity > 30  # Very oversold/overbought (30+ from neutral)
+        is_high_momentum = rsi_extremity > 22  # Strong RSI signal (22+ from neutral)
+        is_strong_macd = abs(macd_momentum) > 2.0  # Higher threshold for strong MACD momentum
+        is_extreme_rsi = rsi_extremity > 35  # Very oversold/overbought (35+ from neutral, stricter for SCALP)
         
         # Classify based on characteristics
         # Priority 1: EXTREME reversals (scalps) - high probability, quick
         # NOTE: tf_score == 3 only (not >=) so perfect 4/4 alignment always falls through
         # to Priority 2, which has its own SWING/TREND_START subdivision for that case.
-        if is_extreme_rsi and is_strong_macd and tf_score == 3:
+        if is_extreme_rsi and is_strong_macd and tf_score >= 3:
             # SCALP: Extreme conditions + high TF confirmation = quick reversal
             trade_type = "SCALP"
-            if rsi_extremity > 38:
-                grade = "A"  # Very extreme
-            elif rsi_extremity > 30:
+            if rsi_extremity > 40:
+                grade = "A"  # Very extreme (40+ from neutral)
+            elif rsi_extremity > 35:
                 grade = "B"
             else:
                 grade = "C"
@@ -847,12 +883,13 @@ def classify_trade_type(
                 hold_time = "1-5 days"
                 risk_level = "Medium"
             
-        # Priority 3: GOOD momentum (high RSI extremity) + high alignment
-        elif is_high_momentum and tf_score >= 3:
+        # Priority 3: GOOD momentum (high RSI extremity) + high alignment - SWING preferred
+        elif is_high_momentum and tf_score >= 2:
+            # Lowered tf_score to 2+ to prioritize SWING trades (more signals)
             trade_type = "SWING"
             if rsi_extremity > 25:
                 grade = "A"
-            elif rsi_extremity > 15:
+            elif rsi_extremity > 18:
                 grade = "B"
             else:
                 grade = "C"
@@ -860,7 +897,7 @@ def classify_trade_type(
                 "Strong momentum move",
                 "Multi-TF confirmation",
                 "2-5 day hold expected",
-                "Good entry timing",
+                "Wait for optimal entry point",
             ]
             hold_time = "2-5 days"
             risk_level = "Medium"
