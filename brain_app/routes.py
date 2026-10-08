@@ -467,21 +467,23 @@ def analyze():
         
         # Adjust decision threshold based on alignment score AND confluence
         # Higher alignment = higher confidence requirement (stricter)
-        # Score 4: require 0.75 (only take strongest signals when perfect alignment)
-        # Score 3: require 0.60 (moderate threshold when 3 TFs confirm)
-        # Score 2: require 0.45 (lenient threshold when only 2 TFs confirm)
-        # Score 1: normally reject, but proceed with high confluence
-        # Score 0: only proceed if confluence is very_high
+        # P1 TIGHTENING (2026-10): previous values in comments. Goal: reduce
+        # loose SWING/SCALP accepts and eliminate the sub-threshold branch
+        # at score 1 that let 40%-model-prob signals through.
+        # Score 4: require 0.78 (was 0.75)
+        # Score 3: require 0.68 (was 0.60)
+        # Score 2: require 0.62 (was 0.45) — biggest leak
+        # Score 1/0: 0.65 default; removed very_high-confluence 0.40 shortcut
         if tf_alignment["tf_alignment_score"] >= 4:
-            threshold = 0.75
+            threshold = 0.78  # was 0.75
         elif tf_alignment["tf_alignment_score"] == 3:
-            threshold = 0.60
+            threshold = 0.68  # was 0.60
         elif tf_alignment["tf_alignment_score"] == 2:
-            threshold = 0.45
-        elif tf_alignment["tf_alignment_score"] == 1 and confluence_level == 'very_high':
-            threshold = 0.40  # Allow low TF score if confluence very strong
+            threshold = 0.62  # was 0.45
         else:
-            threshold = 0.55  # Default stricter threshold
+            # Score 1 and 0: unified strict threshold.
+            # Removed previous `score==1 and confluence=='very_high' -> 0.40` branch.
+            threshold = 0.65  # was 0.55
         
         decision = "accept" if raw_confidence >= threshold else "reject"
         
@@ -539,13 +541,30 @@ def analyze():
     )
     
     # Step 5b: DECISION SMOOTHING - Prevent confidence whiplash (98% → 15% swings)
-    # Apply temporal averaging and hysteresis to reduce noise from consecutive candles
+    # Apply temporal averaging and hysteresis to reduce noise from consecutive candles.
+    #
+    # P0 (2026-10): We also need `trade_type` here so the opposing-direction
+    # cooldown can pick the right window (SCALP=15m, SWING=90m, TREND_START=240m).
+    # `classify_trade_type` is a pure function of (payload, tf_alignment,
+    # confluence_level) so it's safe to call now; the full classification is
+    # still recomputed later for the response payload.
+    from brain_app.features import classify_trade_type as _classify_trade_type_early
+    try:
+        _early_classification = _classify_trade_type_early(
+            payload, tf_alignment, confluence_level=confluence_level
+        )
+        _early_trade_type = _early_classification.get("trade_type")
+    except Exception as _e:
+        logger.warning(f"early trade_type classification failed, using default cooldown: {_e}")
+        _early_trade_type = None
+
     smoothing_result = smooth_decision(
         symbol=payload["symbol"],
         signal_type=payload["signal_type"],
         raw_confidence=confidence,
         raw_decision=decision,
         current_alignment_score=tf_alignment["tf_alignment_score"],
+        trade_type=_early_trade_type,
     )
     
     # Use smoothed decision and confidence
@@ -558,6 +577,16 @@ def analyze():
             f"Tried to flip {smoothing_result['previous_decision']}→{smoothing_result['smoothed_decision']} "
             f"but gap only {smoothing_result['confidence_gap']:.2%} (need 20%) | "
             f"Keeping {decision}"
+        )
+
+    if smoothing_result.get("applied_opposing_cooldown"):
+        _opp = smoothing_result.get("opposing_cooldown_details") or {}
+        logger.warning(
+            f"⚠️ OPPOSING COOLDOWN FORCED REJECT: {payload['symbol']} "
+            f"{payload['signal_type']} | opposite accepted "
+            f"{_opp.get('minutes_since_opposite')}m ago @ "
+            f"{_opp.get('opposite_confidence')} (cooldown {_opp.get('cooldown_minutes')}m, "
+            f"trade_type={_early_trade_type})"
         )
     
     # Step 5c: 12H MOMENTUM BOOST - Small boost when going with strong 12H trend

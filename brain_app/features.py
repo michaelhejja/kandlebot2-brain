@@ -884,12 +884,15 @@ def classify_trade_type(
                 risk_level = "Medium"
             
         # Priority 3: GOOD momentum (high RSI extremity) + high alignment - SWING preferred
-        elif is_high_momentum and tf_score >= 2:
-            # Lowered tf_score to 2+ to prioritize SWING trades (more signals)
+        # P1 TIGHTENING (2026-10): require 3+ TF alignment (was 2+) and raise
+        # RSI extremity floor for Grade C. The old comment "lowered tf_score to 2+
+        # to prioritize SWING trades (more signals)" was actively generating the
+        # loose/conflicting SWING accepts we want to eliminate.
+        elif is_high_momentum and tf_score >= 3:  # was tf_score >= 2
             trade_type = "SWING"
             if rsi_extremity > 25:
                 grade = "A"
-            elif rsi_extremity > 18:
+            elif rsi_extremity > 20:  # was > 18
                 grade = "B"
             else:
                 grade = "C"
