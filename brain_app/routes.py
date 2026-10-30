@@ -504,7 +504,30 @@ def analyze():
     except Exception as _e:
         logger.warning(f"early trade_type classification failed, using default cooldown: {_e}")
         _early_classification, _early_trade_type = None, None
-    strict_adj = strict_trade_adjustment(tf_alignment, _early_trade_type)
+
+    # SWING = reversal at an area with evidence. Score the evidence; if it is too
+    # thin, fall back to SCALP (which has its own gates) instead of a weak SWING.
+    from brain_app.features import (
+        swing_reversal_evidence, calculate_weekly_pivots as _calc_pivots, SWING_MIN_EVIDENCE,
+    )
+    swing_ev, swing_fallback = None, False
+    if _early_trade_type == "SWING":
+        try:
+            _wp = _calc_pivots(payload["symbol"], current_app.candle_store)
+        except Exception:
+            _wp = {}
+        try:
+            swing_ev = swing_reversal_evidence(current_app.db, payload, confluence, _wp)
+        except Exception as _e:
+            logger.error(f"swing evidence failed: {_e}", exc_info=True)
+            swing_ev = {"score": 0.0, "sufficient": False, "components": {}, "reason": "error",
+                        "min_required": SWING_MIN_EVIDENCE}
+        logger.info(f"SWING evidence {swing_ev['score']} (min {SWING_MIN_EVIDENCE}) {swing_ev.get('components')}")
+        if not swing_ev["sufficient"]:
+            _early_trade_type, swing_fallback = "SCALP", True
+    strict_adj = strict_trade_adjustment(tf_alignment, _early_trade_type, swing_evidence=swing_ev)
+    strict_adj["swing_evidence"] = swing_ev
+    strict_adj["swing_fallback"] = swing_fallback
 
     # Step 3: Build feature vector with TF features
     features = build_feature_vector(payload, tf_features=tf_alignment)
@@ -704,6 +727,14 @@ def analyze():
     
     # First classify trade type to know which TP strategy to use
     trade_classification = classify_trade_type(payload, tf_alignment, confluence_level=confluence_level)
+    if swing_fallback:  # keep the response consistent with the decision that was made
+        trade_classification = {
+            **trade_classification,
+            "trade_type": "SCALP",
+            "original_trade_type": "SWING",
+            "confidence": f"{trade_classification.get('grade', '?')}-tier SCALP (SWING evidence {swing_ev['score']} < {SWING_MIN_EVIDENCE})",
+            "hold_time_estimate": "Quick profit - exit on first target",
+        }
     
     # Weekly pivots (PP/R1-R3/S1-S3) - fixed for the whole ISO week, same across all timeframes
     try:

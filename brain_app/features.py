@@ -1220,7 +1220,153 @@ def _scalp_turn(candles: dict, signal_type: str) -> dict[str, Any]:
 SCALP_MIN_TURN_SCORE = 2  # of 3 exhaustion signs on 5m or 15m
 
 
-def strict_trade_adjustment(tf_alignment: dict, trade_type: str | None) -> dict[str, Any]:
+# ---------------------------------------------------------------------------
+# SWING = reversal at an area with evidence (never a falling knife)
+# ---------------------------------------------------------------------------
+SWING_WEIGHTS = {
+    "level_held": 0.25,         # support/resistance held repeatedly
+    "rising_lows": 0.25,        # latest low higher than the previous (RSI too)
+    "confluence": 0.15,         # several agreeing reversal events
+    "location": 0.15,           # at a weekly pivot or 4h/12h EMA200
+    "not_falling_knife": 0.20,  # price is not still accelerating through the level
+}
+SWING_MIN_EVIDENCE = 0.60       # below this a SWING falls back to SCALP
+SWING_KNIFE_CAP = 0.40          # evidence is capped here if it looks like a falling knife
+_SWING_LOOKBACKS = {"1h": 72, "4h": 240}  # hours of history per structure timeframe
+
+
+def _swing_structure(candles: list[dict], long: bool, fallback_atr: float) -> dict | None:
+    """Pivot structure on one timeframe. Mirrored for shorts (pivot highs).
+
+    Values are sign-flipped so "higher is better for the reversal" in both directions.
+    """
+    if len(candles) < 10:
+        return None
+    s = 1.0 if long else -1.0
+    vals = [(c.get("low") if long else -c.get("high")) for c in candles]
+    if any(v is None for v in vals):
+        return None
+    osc = [(None if c.get("rsi") is None else s * c["rsi"]) for c in candles]
+    atr = candles[-1].get("atr") or fallback_atr
+    k = 2
+
+    pivots = []
+    for i in range(k, len(vals) - k):
+        if vals[i] == min(vals[i - k:i + k + 1]) and (not pivots or i - pivots[-1]["i"] > k):
+            pivots.append({"i": i, "val": vals[i], "osc": osc[i]})
+    # Provisional pivot: signals fire near the extreme, before it is confirmed by k later candles
+    if not pivots or len(vals) - 1 - pivots[-1]["i"] > k + 1:
+        j = min(range(len(vals) - 3, len(vals)), key=lambda x: vals[x])
+        if not pivots or j - pivots[-1]["i"] > k:
+            pivots.append({"i": j, "val": vals[j], "osc": osc[j]})
+
+    # Level held: biggest cluster of pivots within 0.5 ATR of each other
+    tol = 0.5 * atr
+    cluster = max((sum(1 for q in pivots if abs(q["val"] - p["val"]) <= tol) for p in pivots), default=0)
+    level = 0.0 if cluster < 2 else (0.5 if cluster == 2 else 1.0)
+
+    # Rising lows: latest pivot above the previous one, ideally with RSI also higher
+    rising = 0.0
+    last = prev = None
+    if len(pivots) >= 2:
+        last, prev = pivots[-1], pivots[-2]
+        if last["val"] > prev["val"] + 0.1 * atr:
+            rising += 0.5
+        if last["osc"] is not None and prev["osc"] is not None and last["osc"] > prev["osc"]:
+            rising += 0.5
+
+    # Falling-knife checks (3): no big lower low, not breaking through the latest low, not in free-fall
+    close_val = s * candles[-1]["close"]
+    checks = []
+    if last is not None and prev is not None:
+        checks.append(last["val"] >= prev["val"] - atr)
+    if last is not None:
+        checks.append(close_val >= last["val"] - 0.5 * atr)
+    adx = candles[-1].get("adx")
+    pdi = mdi = None
+    if isinstance(adx, dict):
+        pdi, mdi, adx = adx.get("pdi"), adx.get("mdi"), adx.get("adx")
+    if None not in (adx, pdi, mdi, candles[-1].get("ema_9")):
+        against = (mdi > pdi) if long else (pdi > mdi)
+        reclaimed = candles[-1]["close"] > candles[-1]["ema_9"] if long else candles[-1]["close"] < candles[-1]["ema_9"]
+        checks.append(not (adx >= 25 and against and not reclaimed))
+    passed = sum(checks)
+    knife = 1.0 if checks and passed == len(checks) else (0.5 if len(checks) >= 2 and passed == len(checks) - 1 else 0.0)
+
+    return {"level_held": level, "rising_lows": rising, "not_falling_knife": knife,
+            "pivots": len(pivots), "cluster": cluster}
+
+
+def swing_reversal_evidence(db, payload: dict, confluence: dict, weekly_pivots: dict | None) -> dict[str, Any]:
+    """Score (0..1) how much evidence there is for a high-quality reversal at this price.
+
+    Components (see SWING_WEIGHTS): a level that held repeatedly, rising lows,
+    confluence of reversal events, location at a weekly pivot / HTF EMA200, and
+    not being a falling knife. Structure is evaluated on 1h and 4h; level/rising take
+    the better timeframe, falling-knife takes the worse.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    symbol, signal = payload["symbol"], payload["signal_type"]
+    long = signal == "long"
+    price = payload.get("close")
+    now = datetime.now(timezone.utc)
+
+    structs, latest = {}, {}
+    for tf, hours in _SWING_LOOKBACKS.items():
+        try:
+            cs = db.get_candles(symbol, tf, since=now - timedelta(hours=hours), limit=300)
+            latest[tf] = cs[-1] if cs else db.get_latest_candle(symbol, tf)
+            fallback_atr = (price or 0) * 0.005
+            structs[tf] = _swing_structure(cs, long, fallback_atr)
+        except Exception:
+            structs[tf] = None
+    valid = [v for v in structs.values() if v]
+
+    if not valid or price is None:
+        return {"score": 0.0, "sufficient": False, "components": {}, "reason": "insufficient_history",
+                "min_required": SWING_MIN_EVIDENCE}
+
+    comp = {
+        "level_held": max(v["level_held"] for v in valid),
+        "rising_lows": max(v["rising_lows"] for v in valid),
+        "not_falling_knife": min(v["not_falling_knife"] for v in valid),
+    }
+
+    # Confluence with a floor: one event is not confluence
+    total = (confluence or {}).get("total_reversals", 0) or 0
+    ratio = (confluence or {}).get("confluence_ratio", 0) or 0
+    comp["confluence"] = 1.0 if (total >= 3 and ratio >= 0.6) else (0.5 if (total == 2 and ratio >= 0.6) else 0.0)
+
+    # Location: near a weekly pivot (S1-S3 for longs / R1-R3 for shorts) or a 4h/12h EMA200
+    h1 = latest.get("1h") or {}
+    atr1h = h1.get("atr") or price * 0.005
+    near = []
+    for key in (("s1", "s2", "s3") if long else ("r1", "r2", "r3")):
+        lvl = (weekly_pivots or {}).get(key)
+        if lvl and abs(price - lvl) <= atr1h:
+            near.append(f"weekly_{key}")
+    for tf in ("4h", "12h"):
+        c = latest.get(tf) if tf in latest else db.get_latest_candle(symbol, tf)
+        if c and c.get("ema_200") and abs(price - c["ema_200"]) <= max(atr1h, c.get("atr") or 0):
+            near.append(f"{tf}_ema200")
+    comp["location"] = 1.0 if near else 0.0
+
+    score = sum(SWING_WEIGHTS[k] * comp[k] for k in SWING_WEIGHTS)
+    if comp["not_falling_knife"] == 0.0:
+        score = min(score, SWING_KNIFE_CAP)  # never catch falling knives
+
+    return {
+        "score": round(score, 3),
+        "sufficient": score >= SWING_MIN_EVIDENCE,
+        "min_required": SWING_MIN_EVIDENCE,
+        "components": {k: round(v, 2) for k, v in comp.items()},
+        "near": near,
+        "structure": structs,
+    }
+
+
+def strict_trade_adjustment(tf_alignment: dict, trade_type: str | None, swing_evidence: dict | None = None) -> dict[str, Any]:
     """Trade-type-aware tightening of the accept decision.
 
     Returns:
@@ -1235,6 +1381,9 @@ def strict_trade_adjustment(tf_alignment: dict, trade_type: str | None) -> dict[
     weights = TF_WEIGHTS[trade_type]
     quality = sum(weights[tf] * tfq.get(tf, 0.0) for tf in weights)
     hard_reject = None
+    reversal = trade_type == "SWING" and swing_evidence is not None
+    if reversal:
+        quality = swing_evidence["score"]  # reversal evidence replaces trend alignment
 
     if trade_type == "SCALP":
         delta = SCALP_THRESHOLD_SPAN * (1 - quality)
@@ -1255,6 +1404,7 @@ def strict_trade_adjustment(tf_alignment: dict, trade_type: str | None) -> dict[
         "weighted_quality": round(quality, 3),
         "threshold_delta": round(delta, 4),
         "hard_reject": hard_reject,
+        "reversal_mode": reversal,
     }
 
 
@@ -1271,6 +1421,11 @@ def heuristic_decision(rsi: float, tf_alignment: dict, strict_adj: dict) -> tupl
 
     Returns (decision, confidence, threshold).
     """
+    if strict_adj.get("reversal_mode"):
+        # SWING reversals are expected at RSI extremes: confidence is the evidence score itself
+        confidence = strict_adj["weighted_quality"]
+        threshold = HEURISTIC_THRESHOLD_BASE + strict_adj.get("threshold_delta", 0.0)
+        return ("accept" if confidence >= threshold else "reject"), round(confidence, 4), round(threshold, 4)
     rsi_conf = max(0.0, min(1.0, 1.0 - abs(rsi - 50.0) / 50.0))
     quality = strict_adj.get("weighted_quality")
     if quality is None:  # trade type unknown: fall back to simple TF score
