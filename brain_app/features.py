@@ -1205,11 +1205,7 @@ def _scalp_turn(candles: dict, signal_type: str) -> dict[str, Any]:
 
     score = max(evidence(candles.get("5m")), evidence(candles.get("15m")))
 
-    h1 = candles.get("1h") or {}
-    adx = h1.get("adx")
-    pdi = mdi = None
-    if isinstance(adx, dict):
-        pdi, mdi, adx = adx.get("pdi"), adx.get("mdi"), adx.get("adx")
+    adx, pdi, mdi = _adx_parts(candles.get("1h") or {})
     htf_freefall = bool(
         adx is not None and pdi is not None and mdi is not None and adx >= 25
         and ((mdi > pdi) if long else (pdi > mdi))
@@ -1218,6 +1214,14 @@ def _scalp_turn(candles: dict, signal_type: str) -> dict[str, Any]:
 
 
 SCALP_MIN_TURN_SCORE = 2  # of 3 exhaustion signs on 5m or 15m
+
+
+def _adx_parts(c: dict) -> tuple:
+    """(adx, pdi, mdi) from a candle: payload shape {adx: {adx,pdi,mdi}} or DB-row shape adx/pdi/mdi."""
+    a = c.get("adx")
+    if isinstance(a, dict):
+        return a.get("adx"), a.get("pdi"), a.get("mdi")
+    return a, c.get("pdi"), c.get("mdi")
 
 
 # ---------------------------------------------------------------------------
@@ -1282,10 +1286,7 @@ def _swing_structure(candles: list[dict], long: bool, fallback_atr: float) -> di
         checks.append(last["val"] >= prev["val"] - atr)
     if last is not None:
         checks.append(close_val >= last["val"] - 0.5 * atr)
-    adx = candles[-1].get("adx")
-    pdi = mdi = None
-    if isinstance(adx, dict):
-        pdi, mdi, adx = adx.get("pdi"), adx.get("mdi"), adx.get("adx")
+    adx, pdi, mdi = _adx_parts(candles[-1])
     if None not in (adx, pdi, mdi, candles[-1].get("ema_9")):
         against = (mdi > pdi) if long else (pdi > mdi)
         reclaimed = candles[-1]["close"] > candles[-1]["ema_9"] if long else candles[-1]["close"] < candles[-1]["ema_9"]

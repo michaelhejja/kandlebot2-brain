@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS candles (
     crsi REAL,
     rsi REAL,
     adx REAL,
+    pdi REAL,
+    mdi REAL,
     atr REAL,
     mfi REAL,
     
@@ -111,6 +113,11 @@ class Database:
         with self.get_connection() as conn:
             conn.executescript(CANDLES_SCHEMA)
             conn.executescript(REVERSALS_SCHEMA)
+            # Migrate databases created before pdi/mdi existed (Heroku's is rebuilt on restart, local files are not)
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(candles)")}
+            for col in ("pdi", "mdi"):
+                if col not in existing:
+                    conn.execute(f"ALTER TABLE candles ADD COLUMN {col} REAL")
             conn.commit()
         logger.info(f"Database initialized at {self.db_path}")
 
@@ -163,9 +170,9 @@ class Database:
                     INSERT INTO candles (
                         symbol, timeframe, timestamp,
                         open, high, low, close, volume,
-                        ema_9, ema_20, ema_50, ema_200, crsi, rsi, adx, atr, mfi,
+                        ema_9, ema_20, ema_50, ema_200, crsi, rsi, adx, pdi, mdi, atr, mfi,
                         source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         symbol,
@@ -183,6 +190,8 @@ class Database:
                         indicators.get("crsi"),
                         indicators.get("rsi"),
                         indicators.get("adx"),
+                        indicators.get("pdi"),
+                        indicators.get("mdi"),
                         indicators.get("atr"),
                         indicators.get("mfi"),
                         source,
@@ -199,7 +208,7 @@ class Database:
                     """
                     UPDATE candles SET
                         open=?, high=?, low=?, close=?, volume=?,
-                        ema_9=?, ema_20=?, ema_50=?, ema_200=?, crsi=?, rsi=?, adx=?, atr=?, mfi=?,
+                        ema_9=?, ema_20=?, ema_50=?, ema_200=?, crsi=?, rsi=?, adx=?, pdi=?, mdi=?, atr=?, mfi=?,
                         source=?
                     WHERE symbol=? AND timeframe=? AND timestamp=?
                     """,
@@ -216,6 +225,8 @@ class Database:
                         indicators.get("crsi"),
                         indicators.get("rsi"),
                         indicators.get("adx"),
+                        indicators.get("pdi"),
+                        indicators.get("mdi"),
                         indicators.get("atr"),
                         indicators.get("mfi"),
                         source,

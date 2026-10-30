@@ -168,6 +168,8 @@ class CandleStore:
             "crsi": last_candle["crsi"],
             "rsi": last_candle["rsi"],
             "adx": last_candle["adx"],
+            "pdi": last_candle["pdi"],
+            "mdi": last_candle["mdi"],
             "atr": last_candle["atr"],
             "mfi": last_candle["mfi"],
         }

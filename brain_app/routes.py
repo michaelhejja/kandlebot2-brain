@@ -173,7 +173,12 @@ def sync_candle():
         
         # Handle ADX: if it's a dict {adx, pdi, mdi}, extract just the adx value
         if "adx" in indicators and isinstance(indicators["adx"], dict):
-            indicators["adx"] = indicators["adx"].get("adx", 0)
+            _adx = indicators["adx"]
+            indicators["adx"] = _adx.get("adx", 0)
+            if _adx.get("pdi") is not None:
+                indicators["pdi"] = _adx["pdi"]
+            if _adx.get("mdi") is not None:
+                indicators["mdi"] = _adx["mdi"]
         
         # Extract timeframe (optional, defaults to "1m")
         timeframe = payload.get("timeframe", "1m")
@@ -386,7 +391,12 @@ def bulk_sync_candles():
             
             # Handle ADX: if it's a dict {adx, pdi, mdi}, extract just the adx value
             if "adx" in indicators and isinstance(indicators["adx"], dict):
-                indicators["adx"] = indicators["adx"].get("adx", 0)
+                _adx = indicators["adx"]
+                indicators["adx"] = _adx.get("adx", 0)
+                if _adx.get("pdi") is not None:
+                    indicators["pdi"] = _adx["pdi"]
+                if _adx.get("mdi") is not None:
+                    indicators["mdi"] = _adx["mdi"]
 
             # Extract timeframe (optional, defaults to "1m")
             timeframe = candle.get("timeframe", "1m")
