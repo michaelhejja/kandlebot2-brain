@@ -807,6 +807,16 @@ def classify_trade_type(
         # Get TF alignment strength
         tf_score = tf_alignment.get("tf_alignment_score", 0)
         
+        # Graded, EMA-based quality caps the loose boolean score so e.g. "price below
+        # the 12h/4h EMA200" can no longer count as aligned.
+        tfq = tf_alignment.get("tf_quality")
+        tf_quality = (
+            sum(w * tfq.get(tf, 0.0) for tf, w in TF_WEIGHTS["SWING"].items())
+            if tfq else None
+        )
+        if tf_quality is not None:
+            tf_score = min(tf_score, round(tf_quality * 4))
+        
         # Momentum indicators
         macd_momentum = macd - macd_signal  # Positive = momentum
         rsi_extremity = abs(rsi - 50.0)  # How extreme is RSI
@@ -819,15 +829,22 @@ def classify_trade_type(
         
         # Decision logic
         is_high_momentum = rsi_extremity > 22  # Strong RSI signal (22+ from neutral)
-        is_strong_macd = abs(macd_momentum) > 2.0  # Higher threshold for strong MACD momentum
+        # MACD is not sent by the Node server, so also accept ADX as strong momentum.
+        adx_val = indicators.get("adx")
+        adx_val = adx_val.get("adx") if isinstance(adx_val, dict) else adx_val
+        is_strong_macd = abs(macd_momentum) > 2.0 or (adx_val or 0) >= 25
+
+        # Trend direction relative to the signal (positive = trend supports the trade)
+        direction = -1 if payload.get("signal_type") == "short" else 1
+        directional_trend = macro_trend_strength * direction
         is_extreme_rsi = rsi_extremity > 35  # Very oversold/overbought (35+ from neutral, stricter for SCALP)
         
         # Classify based on characteristics
         # Priority 1: EXTREME reversals (scalps) - high probability, quick
         # NOTE: tf_score == 3 only (not >=) so perfect 4/4 alignment always falls through
         # to Priority 2, which has its own SWING/TREND_START subdivision for that case.
-        if is_extreme_rsi and is_strong_macd and tf_score >= 3:
-            # SCALP: Extreme conditions + high TF confirmation = quick reversal
+        if is_extreme_rsi and is_strong_macd:
+            # SCALP: Extreme conditions = quick reversal bounce (HTF gates applied later)
             trade_type = "SCALP"
             if rsi_extremity > 40:
                 grade = "A"  # Very extreme (40+ from neutral)
@@ -859,7 +876,7 @@ def classify_trade_type(
                 ]
                 hold_time = "2-5 days"
                 risk_level = "Medium"
-            elif is_strong_macd or (is_high_momentum and abs(macro_trend_strength) > 0.5):
+            elif directional_trend > 0.5 and (is_strong_macd or is_high_momentum):
                 # Perfect alignment + good MACD or momentum + trend = trend start
                 trade_type = "TREND_START"
                 grade = "A"
@@ -906,7 +923,7 @@ def classify_trade_type(
             risk_level = "Medium"
             
         # Priority 4: DEVELOPING trend (3+ TFs aligned)
-        elif tf_score >= 3 and abs(macro_trend_strength) >= 1.0:
+        elif tf_score >= 3 and directional_trend >= 1.0:
             trade_type = "TREND_START"
             if tf_score == 3:
                 grade = "B"
@@ -931,7 +948,9 @@ def classify_trade_type(
         
         # NEW: Apply confluence-based grade upgrades
         # When multiple recent signals agree, upgrade the grade to reflect conviction
-        if confluence_level == "very_high":
+        if tf_quality is not None and tf_quality < 0.5:
+            pass  # HTFs against the trade: confluence must not lift the grade
+        elif confluence_level == "very_high":
             # 85%+ consensus = strong validation, upgrade any grade
             if grade == "C":
                 grade = "B"
