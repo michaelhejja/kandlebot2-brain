@@ -573,13 +573,13 @@ def analyze():
     else:
         # Fallback to heuristic
         rsi = features.get("rsi", 50.0)
-        confidence = 1.0 - (abs(rsi - 50.0) / 50.0)
-        confidence = max(0.0, min(1.0, confidence))
-        decision = "accept" if 30.0 <= rsi <= 70.0 else "reject"
-        # Heuristic path has no explicit threshold; use a nominal value for
-        # forensic records so the schema stays consistent.
+        from brain_app.features import heuristic_decision
+        decision, confidence, threshold = heuristic_decision(rsi, tf_alignment, strict_adj)
         raw_confidence = confidence
-        threshold = 0.5
+        logger.info(
+            f"Heuristic [{_early_trade_type}]: rsi={rsi:.1f} quality={strict_adj['weighted_quality']} "
+            f"conf={confidence:.3f} threshold={threshold:.3f} -> {decision}"
+        )
     
     # Step 5: Analyze reversal signals from MFI detector
     reversal_analysis = analyze_reversal_signals(payload, payload["signal_type"])

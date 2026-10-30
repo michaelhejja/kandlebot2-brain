@@ -1189,6 +1189,29 @@ def strict_trade_adjustment(tf_alignment: dict, trade_type: str | None) -> dict[
     }
 
 
+HEURISTIC_THRESHOLD_BASE = 0.30
+
+
+def heuristic_decision(rsi: float, tf_alignment: dict, strict_adj: dict) -> tuple[str, float, float]:
+    """Fallback accept/reject when no trained model is loaded.
+
+    confidence = RSI-centredness (1.0 at RSI 50) x weighted TF quality, so a
+    setup that fights the higher timeframes can't pass on RSI alone.
+    threshold = HEURISTIC_THRESHOLD_BASE + trade-type threshold_delta
+    (SWING/TREND_START stricter than SCALP).
+
+    Returns (decision, confidence, threshold).
+    """
+    rsi_conf = max(0.0, min(1.0, 1.0 - abs(rsi - 50.0) / 50.0))
+    quality = strict_adj.get("weighted_quality")
+    if quality is None:  # trade type unknown: fall back to simple TF score
+        quality = tf_alignment.get("tf_alignment_score", 0) / 4.0
+    confidence = rsi_conf * quality
+    threshold = HEURISTIC_THRESHOLD_BASE + strict_adj.get("threshold_delta", 0.0)
+    ok = 30.0 <= rsi <= 70.0 and confidence >= threshold and not strict_adj.get("hard_reject")
+    return ("accept" if ok else "reject"), round(confidence, 4), round(threshold, 4)
+
+
 def _check_30m_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
     """30m alignment check with detailed failure reason."""
     if not candle:
