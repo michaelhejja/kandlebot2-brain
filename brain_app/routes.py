@@ -64,6 +64,37 @@ def debug_clear_hunting_mode():
     ), 200
 
 
+@api_bp.get("/debug/recent-decisions")
+def debug_recent_decisions():
+    """Return the most recent decisions from the forensics JSONL log.
+
+    Query params:
+      - symbol:    optional filter (e.g. 'BTC-USDT')
+      - limit:     max rows to return (default 50, max 500)
+      - days_back: how many daily files to scan (default 2, max 14)
+
+    Example: /debug/recent-decisions?symbol=BTC-USDT&limit=20
+    """
+    from .forensics import read_recent
+
+    symbol = request.args.get("symbol")
+    try:
+        limit = min(int(request.args.get("limit", 50)), 500)
+    except ValueError:
+        limit = 50
+    try:
+        days_back = min(int(request.args.get("days_back", 2)), 14)
+    except ValueError:
+        days_back = 2
+
+    rows = read_recent(symbol=symbol, limit=limit, days_back=days_back)
+    return jsonify(
+        count=len(rows),
+        symbol_filter=symbol,
+        decisions=rows,
+    ), 200
+
+
 @api_bp.post("/sync")
 def sync_candle():
     """Receive candle from Node server and store it in the database.
@@ -449,6 +480,20 @@ def analyze():
             }
         ), 200
     
+    # Step 2b: Classify trade type BEFORE the decision so the accept threshold
+    # can depend on it. (Pure function of payload / tf_alignment / confluence.)
+    from brain_app.features import classify_trade_type as _classify_trade_type_early
+    from brain_app.features import strict_trade_adjustment
+    try:
+        _early_classification = _classify_trade_type_early(
+            payload, tf_alignment, confluence_level=confluence_level
+        )
+        _early_trade_type = _early_classification.get("trade_type")
+    except Exception as _e:
+        logger.warning(f"early trade_type classification failed, using default cooldown: {_e}")
+        _early_classification, _early_trade_type = None, None
+    strict_adj = strict_trade_adjustment(tf_alignment, _early_trade_type)
+
     # Step 3: Build feature vector with TF features
     features = build_feature_vector(payload, tf_features=tf_alignment)
     
@@ -485,7 +530,18 @@ def analyze():
             # Removed previous `score==1 and confluence=='very_high' -> 0.40` branch.
             threshold = 0.65  # was 0.55
         
+        # Trade-type-aware tightening: SWING/TREND_START weight 4h/12h/1h EMAs
+        # heavily (strict weighted bar, no hard gates); SCALP weights 5m-30m and
+        # keeps hard gates for clearly bad setups.
+        threshold = min(0.97, threshold + strict_adj["threshold_delta"])
         decision = "accept" if raw_confidence >= threshold else "reject"
+        if strict_adj["hard_reject"]:
+            decision = "reject"
+            logger.info(f"Scalp hard gate: {strict_adj['hard_reject']} for {payload['symbol']}")
+        logger.info(
+            f"Strict adj [{_early_trade_type}]: quality={strict_adj['weighted_quality']} "
+            f"delta=+{strict_adj['threshold_delta']} threshold={threshold:.3f} raw={raw_confidence:.3f}"
+        )
         
         # Confidence boost for high-conviction setups
         confidence = raw_confidence
@@ -520,6 +576,10 @@ def analyze():
         confidence = 1.0 - (abs(rsi - 50.0) / 50.0)
         confidence = max(0.0, min(1.0, confidence))
         decision = "accept" if 30.0 <= rsi <= 70.0 else "reject"
+        # Heuristic path has no explicit threshold; use a nominal value for
+        # forensic records so the schema stays consistent.
+        raw_confidence = confidence
+        threshold = 0.5
     
     # Step 5: Analyze reversal signals from MFI detector
     reversal_analysis = analyze_reversal_signals(payload, payload["signal_type"])
@@ -548,16 +608,7 @@ def analyze():
     # `classify_trade_type` is a pure function of (payload, tf_alignment,
     # confluence_level) so it's safe to call now; the full classification is
     # still recomputed later for the response payload.
-    from brain_app.features import classify_trade_type as _classify_trade_type_early
-    try:
-        _early_classification = _classify_trade_type_early(
-            payload, tf_alignment, confluence_level=confluence_level
-        )
-        _early_trade_type = _early_classification.get("trade_type")
-    except Exception as _e:
-        logger.warning(f"early trade_type classification failed, using default cooldown: {_e}")
-        _early_trade_type = None
-
+    # (trade type already classified in Step 2b)
     smoothing_result = smooth_decision(
         symbol=payload["symbol"],
         signal_type=payload["signal_type"],
@@ -697,6 +748,34 @@ def analyze():
             "risk_reward_ratio": 1.0
         }
     
+    # ------------------------------------------------------------------
+    # Phase 1 forensics: append this decision to today's JSONL.
+    # Pure observability — must never affect the response. Call site is
+    # kept here (just before jsonify) so every value is finalised.
+    # ------------------------------------------------------------------
+    try:
+        from brain_app.forensics import log_decision as _forensics_log
+        _forensics_log(
+            payload=payload,
+            decision=decision,
+            final_confidence=confidence,
+            raw_confidence=raw_confidence,
+            threshold=threshold,
+            tf_alignment=tf_alignment,
+            confluence=confluence,
+            confluence_level=confluence_level,
+            smoothing_result=smoothing_result,
+            trade_classification=trade_classification,
+            model_used="trained" if classifier.is_trained_model else "heuristic_fallback",
+            extras={
+                "hunting_mode_active": hunting_status.get("is_hunting"),
+                "hunting_direction_aligned": hunting_status.get("direction_aligned"),
+                "reversal_boost": reversal_decision.get("reversal_boost"),
+            },
+        )
+    except Exception as _fe:
+        logger.error(f"forensics logging failed (non-fatal): {_fe}")
+
     return jsonify(
         symbol=payload["symbol"],
         signal_type=payload["signal_type"],
@@ -726,4 +805,6 @@ def analyze():
         confluence_analysis=confluence,
         # Hunting mode (tracks TREND_START inflection zones)
         hunting_mode=hunting_status,
+        # Strict weighted TF quality used for the accept threshold
+        strict_adjustment={**strict_adj, "tf_quality": tf_alignment.get("tf_quality"), "threshold": threshold},
     ), 200

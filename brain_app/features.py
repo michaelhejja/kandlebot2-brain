@@ -1063,6 +1063,7 @@ def check_timeframe_alignment(
             "tf_12h_aligned": 1 if aligned_12h else 0,
             "details": details,
             "detailed_checks": detailed_checks,
+            "tf_quality": _tf_quality(candles, signal_type),
         }
     except Exception as e:
         import logging
@@ -1078,6 +1079,114 @@ def check_timeframe_alignment(
             "details": f"Error checking alignment: {str(e)}",
             "detailed_checks": {"error": str(e)},
         }
+
+
+# ---------------------------------------------------------------------------
+# Strict weighted TF quality (SWING / TREND_START / SCALP decision tightening)
+# ---------------------------------------------------------------------------
+
+# Per-timeframe weights (each set sums to 1.0).
+# SWING / TREND_START lean on the higher timeframes; SCALP on the lower ones.
+TF_WEIGHTS = {
+    "SWING":  {"5m": 0.00, "15m": 0.05, "30m": 0.10, "1h": 0.20, "4h": 0.30, "12h": 0.35},
+    "SCALP":  {"5m": 0.25, "15m": 0.25, "30m": 0.25, "1h": 0.15, "4h": 0.07, "12h": 0.03},
+}
+TF_WEIGHTS["TREND_START"] = TF_WEIGHTS["SWING"]
+
+# Threshold added on top of the base model threshold: BASE + SPAN * (1 - quality).
+# quality=1.0 -> +BASE, quality=0.5 -> +BASE + SPAN/2, ...
+SWING_THRESHOLD_BASE = 0.05
+SWING_THRESHOLD_SPAN = 0.25
+SCALP_THRESHOLD_SPAN = 0.05
+
+
+def _tf_quality(candles: dict, signal_type: str) -> dict[str, float]:
+    """Graded 0..1 trend quality per timeframe, using EMAs and price vs average.
+
+    Unlike the boolean `_check_*_with_reason` helpers, EMA stack / price-vs-EMA200
+    positions actually count here. Missing indicators are skipped (not penalised).
+    """
+    long = signal_type == "long"
+
+    def ok(a, b):
+        """1.0 if a is on the signal side of b, else 0.0; None if unknown."""
+        if a is None or b is None:
+            return None
+        return float(a > b) if long else float(a < b)
+
+    def mean(parts):
+        parts = [p for p in parts if p is not None]
+        return sum(parts) / len(parts) if parts else 0.0
+
+    def g(tf, key):
+        return (candles.get(tf) or {}).get(key)
+
+    def adx(tf):
+        a = g(tf, "adx")
+        a = a.get("adx") if isinstance(a, dict) else a
+        return None if a is None else float(a > 20)
+
+    def rsi_ok(tf):
+        r = g(tf, "rsi")
+        if r is None:
+            return None
+        return float(r > 20) if long else float(r < 80)  # not blown-out against us
+
+    q = {}
+    q["5m"] = mean([ok(g("5m", "ema_9"), g("5m", "ema_20")), ok(g("5m", "close"), g("5m", "ema_9"))])
+    for tf in ("15m", "30m"):
+        q[tf] = mean([ok(g(tf, "ema_20"), g(tf, "ema_50")), ok(g(tf, "close"), g(tf, "ema_9"))])
+    q["1h"] = mean([
+        ok(g("1h", "ema_20"), g("1h", "ema_50")),
+        ok(g("1h", "ema_50"), g("1h", "ema_200")),
+        ok(g("1h", "close"), g("1h", "ema_200")),
+        adx("1h"),
+    ])
+    q["4h"] = mean([
+        ok(g("4h", "ema_50"), g("4h", "ema_200")),
+        ok(g("4h", "close"), g("4h", "ema_200")),
+        ok(g("4h", "close"), g("4h", "ema_50")),
+        rsi_ok("4h"),
+    ])
+    q["12h"] = mean([
+        ok(g("12h", "close"), g("12h", "ema_200")),
+        ok(g("12h", "ema_50"), g("12h", "ema_200")),
+        ok(g("12h", "close"), g("12h", "ema_50")),
+    ])
+    return {tf: round(v, 3) for tf, v in q.items()}
+
+
+def strict_trade_adjustment(tf_alignment: dict, trade_type: str | None) -> dict[str, Any]:
+    """Trade-type-aware tightening of the accept decision.
+
+    Returns:
+        weighted_quality: 0..1 weighted TF quality for this trade type
+        threshold_delta:  amount to ADD to the model accept threshold
+        hard_reject:      reason string if a SCALP hard-gate trips, else None
+    """
+    tfq = tf_alignment.get("tf_quality")
+    if not tfq or trade_type not in TF_WEIGHTS:
+        return {"weighted_quality": None, "threshold_delta": 0.0, "hard_reject": None}
+
+    weights = TF_WEIGHTS[trade_type]
+    quality = sum(weights[tf] * tfq.get(tf, 0.0) for tf in weights)
+    hard_reject = None
+
+    if trade_type == "SCALP":
+        delta = SCALP_THRESHOLD_SPAN * (1 - quality)
+        # Hard gates: situations where a scalp is simply a bad idea.
+        if tfq.get("5m", 0) == 0 and tfq.get("15m", 0) == 0:
+            hard_reject = "scalp_short_tf_momentum_against"
+        elif tfq.get("4h", 0) == 0 and tfq.get("12h", 0) == 0:
+            hard_reject = "scalp_fighting_higher_tf_trend"
+    else:  # SWING / TREND_START: strict weighted score, no hard gates
+        delta = SWING_THRESHOLD_BASE + SWING_THRESHOLD_SPAN * (1 - quality)
+
+    return {
+        "weighted_quality": round(quality, 3),
+        "threshold_delta": round(delta, 4),
+        "hard_reject": hard_reject,
+    }
 
 
 def _check_30m_alignment_with_reason(candle: dict, signal_type: str) -> tuple[bool, str]:
