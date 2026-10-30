@@ -1083,6 +1083,7 @@ def check_timeframe_alignment(
             "details": details,
             "detailed_checks": detailed_checks,
             "tf_quality": _tf_quality(candles, signal_type),
+            "scalp_turn": _scalp_turn(candles, signal_type),
         }
     except Exception as e:
         import logging
@@ -1175,6 +1176,50 @@ def _tf_quality(candles: dict, signal_type: str) -> dict[str, float]:
     return {tf: round(v, 3) for tf, v in q.items()}
 
 
+def _scalp_turn(candles: dict, signal_type: str) -> dict[str, Any]:
+    """Evidence that a reversal scalp is turning (exhaustion), not still falling.
+
+    Per short timeframe (5m, 15m) counts: RSI/MFI at an extreme, price reclaimed
+    EMA9, and a rejection candle (closed up, in the top half of its range).
+    Also reports whether the 1h is still trending hard against the trade.
+    """
+    long = signal_type == "long"
+
+    def evidence(c):
+        if not c:
+            return 0
+        n = 0
+        rsi, mfi = c.get("rsi"), c.get("mfi")
+        if (rsi is not None and (rsi <= 30 if long else rsi >= 70)) or \
+           (mfi is not None and (mfi <= 20 if long else mfi >= 80)):
+            n += 1
+        close, ema9 = c.get("close"), c.get("ema_9")
+        if close is not None and ema9 is not None and (close > ema9 if long else close < ema9):
+            n += 1
+        o, h, l = c.get("open"), c.get("high"), c.get("low")
+        if None not in (close, o, h, l) and h > l:
+            pos = (close - l) / (h - l)
+            if (close > o and pos >= 0.5) if long else (close < o and pos <= 0.5):
+                n += 1
+        return n
+
+    score = max(evidence(candles.get("5m")), evidence(candles.get("15m")))
+
+    h1 = candles.get("1h") or {}
+    adx = h1.get("adx")
+    pdi = mdi = None
+    if isinstance(adx, dict):
+        pdi, mdi, adx = adx.get("pdi"), adx.get("mdi"), adx.get("adx")
+    htf_freefall = bool(
+        adx is not None and pdi is not None and mdi is not None and adx >= 25
+        and ((mdi > pdi) if long else (pdi > mdi))
+    )
+    return {"turn_score": score, "htf_freefall": htf_freefall}
+
+
+SCALP_MIN_TURN_SCORE = 2  # of 3 exhaustion signs on 5m or 15m
+
+
 def strict_trade_adjustment(tf_alignment: dict, trade_type: str | None) -> dict[str, Any]:
     """Trade-type-aware tightening of the accept decision.
 
@@ -1194,10 +1239,15 @@ def strict_trade_adjustment(tf_alignment: dict, trade_type: str | None) -> dict[
     if trade_type == "SCALP":
         delta = SCALP_THRESHOLD_SPAN * (1 - quality)
         # Hard gates: situations where a scalp is simply a bad idea.
-        if tfq.get("5m", 0) == 0 and tfq.get("15m", 0) == 0:
-            hard_reject = "scalp_short_tf_momentum_against"
-        elif tfq.get("4h", 0) == 0 and tfq.get("12h", 0) == 0:
-            hard_reject = "scalp_fighting_higher_tf_trend"
+        # Short TFs against the trade are fine for a reversal scalp if there is
+        # evidence of exhaustion/turning; otherwise it is a falling knife.
+        turn = tf_alignment.get("scalp_turn") or {}
+        turn_score = turn.get("turn_score", 0)
+        if tfq.get("5m", 0) == 0 and tfq.get("15m", 0) == 0 and turn_score < SCALP_MIN_TURN_SCORE:
+            hard_reject = "scalp_no_reversal_evidence"
+        elif tfq.get("4h", 0) == 0 and tfq.get("12h", 0) == 0 and turn.get("htf_freefall") \
+                and turn_score < SCALP_MIN_TURN_SCORE:
+            hard_reject = "scalp_fighting_higher_tf_freefall"
     else:  # SWING / TREND_START: strict weighted score, no hard gates
         delta = SWING_THRESHOLD_BASE + SWING_THRESHOLD_SPAN * (1 - quality)
 
