@@ -226,6 +226,25 @@ class Database:
                 )
                 conn.commit()
 
+    def get_candle_summary(self, symbol: str) -> dict:
+        """Per-timeframe candle count and latest timestamp for a symbol."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT timeframe, COUNT(*), MAX(timestamp) FROM candles "
+                "WHERE symbol = ? GROUP BY timeframe",
+                (symbol,),
+            ).fetchall()
+        return {r[0]: {"count": r[1], "latest": r[2]} for r in rows}
+
+    def get_candle_source(self, symbol: str, timeframe: str, timestamp: datetime) -> str | None:
+        """Source of an existing candle (None if absent)."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT source FROM candles WHERE symbol = ? AND timeframe = ? AND timestamp = ?",
+                (symbol, timeframe, timestamp.isoformat()),
+            ).fetchone()
+        return row[0] if row else None
+
     def get_latest_candle(
         self, symbol: str, timeframe: str
     ) -> dict | None:

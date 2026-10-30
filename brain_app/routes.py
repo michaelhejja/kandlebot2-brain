@@ -287,6 +287,18 @@ def record_reversal():
         return jsonify(error=f"Error recording reversal: {str(e)}"), 500
 
 
+@api_bp.get("/candle-status")
+def candle_status():
+    """Candle count / latest timestamp per timeframe, so Node can detect an
+    empty (restarted) Brain and re-send history."""
+    if not _check_api_key():
+        return jsonify(error="Unauthorized"), 401
+    symbol = request.args.get("symbol")
+    if not symbol:
+        return jsonify(error="Missing 'symbol' query parameter"), 400
+    return jsonify(symbol=symbol, timeframes=current_app.candle_store.db.get_candle_summary(symbol)), 200
+
+
 @api_bp.post("/bulk-sync")
 def bulk_sync_candles():
     """Receive multiple historical candles and store them all at once.

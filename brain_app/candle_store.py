@@ -78,6 +78,11 @@ class CandleStore:
             bucket_end = bucket_start + timedelta(minutes=minutes)
 
             # Try to aggregate constituent 1min candles
+            # Node sends real per-timeframe candles (with that timeframe's own
+            # indicators); never overwrite them with 1m-derived aggregates.
+            existing_source = self.db.get_candle_source(symbol, tf, bucket_start)
+            if existing_source and existing_source != "aggregated":
+                continue
             aggregated = self._try_aggregate(symbol, bucket_start, bucket_end)
             if aggregated:
                 try:
